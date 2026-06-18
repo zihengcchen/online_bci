@@ -360,6 +360,10 @@ def collect_training_segments(
     for name in segment_names:
         safe_name = str(name).strip().replace(" ", "_") or f"segment_{len(paths) + 1:02d}"
         out = output_dir / f"{safe_name}.npz"
+        print(
+            f"Collecting training segment {len(paths) + 1}/{len(segment_names)}: {safe_name}",
+            flush=True,
+        )
         paths.append(
             collect_mp150_recording(
                 output_npz=out,
@@ -1717,8 +1721,9 @@ def run_realtime_mp150_prediction(
 ) -> Dict[str, Any]:
     """Stream MP150 data and emit causal model predictions in real time.
 
-    The full raw trial is also saved so the audio channel can be used later for
-    posthoc labeling and scoring.
+    The full raw trial is saved continuously. Model predictions are made on
+    sliding windows using the checkpoint's window length, stride, and feature
+    settings.
     """
 
     output_dir = ensure_dir(output_dir)
@@ -1934,10 +1939,10 @@ def collect_preprocess_and_test_trial(
     acquisition_config: AcquisitionConfig,
     preprocess_config: PreprocessConfig,
     label_config: AudioLabelConfig,
-    duration_sec: float = 60.0,
+    duration_sec: float = 300.0,
     trial_name: str = "test_trial",
 ) -> Dict[str, Any]:
-    """Collect a trial, run real-time predictions, then label and score posthoc."""
+    """Collect one continuous trial, predict on sliding windows, then score posthoc."""
 
     realtime = run_realtime_mp150_prediction(
         output_dir=output_dir,
