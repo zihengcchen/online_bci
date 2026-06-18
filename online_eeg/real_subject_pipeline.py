@@ -47,10 +47,10 @@ class AcquisitionConfig:
 class AudioLabelConfig:
     """Settings for deriving sample labels from the audio cue channel.
 
-    The default is a binary task where each detected cue marks class 1 for
-    ``label_duration_sec`` seconds and everything else is class 0. For cued
-    multi-class tasks, set ``cue_label_sequence`` to the expected labels in
-    onset order, for example ``[1, 2, 1, 2]``.
+    The default is a binary state-transition task: label 0 before the
+    first cue, then switch to 1 at the first cue, back to 0 at the second cue,
+    and so on. For explicit cued multi-class tasks, set ``cue_label_sequence``
+    to the expected labels in onset order, for example ``[1, 2, 1, 2]``.
     """
 
     class_names: Tuple[str, ...] = ("Idle", "Task")
@@ -58,6 +58,7 @@ class AudioLabelConfig:
     active_label: int = 1
     cue_label_sequence: Optional[Tuple[Union[int, str], ...]] = None
     cycle_cue_sequence: bool = True
+    alternate_binary_labels: bool = True
     label_duration_sec: Optional[float] = None
     label_start_offset_sec: float = 0.0
     infer_labels_from_audio_peaks: bool = False
@@ -504,18 +505,22 @@ def labels_from_audio_onsets(
                     f"Detected {len(onsets)} cues but cue_label_sequence only has {len(seq)} labels."
                 )
         cue_labels = np.asarray(cue_labels, dtype=np.int64)
+    elif config.alternate_binary_labels:
+        seq = [int(config.active_label), int(config.baseline_label)]
+        cue_labels = np.asarray([seq[i % 2] for i in range(len(onsets))], dtype=np.int64)
     else:
         cue_labels = np.full(len(onsets), int(config.active_label), dtype=np.int64)
 
     start_offset = int(round(float(config.label_start_offset_sec) * fs))
+    transition_mode = config.label_duration_sec is None
     fixed_duration = None
-    if config.label_duration_sec is not None:
+    if not transition_mode:
         fixed_duration = max(1, int(round(float(config.label_duration_sec) * fs)))
 
     rows: List[Dict[str, Any]] = []
     for i, onset in enumerate(onsets):
         start = int(np.clip(int(onset) + start_offset, 0, n_samples))
-        if fixed_duration is None:
+        if transition_mode:
             next_onset = int(onsets[i + 1]) + start_offset if i + 1 < len(onsets) else n_samples
             end = int(np.clip(next_onset, start, n_samples))
         else:
@@ -696,7 +701,7 @@ def preprocess_recording(
         preprocess_config_json=np.array(json.dumps(_json_safe(asdict(preprocess_config)))),
         label_config_json=np.array(json.dumps(_json_safe(asdict(label_config)))),
         cue_table_csv=np.array(str(cue_csv)),
-        label_convention=np.array("sample_labels indexes class_names"),
+        label_convention=np.array("sample_labels indexes class_names; cue onsets are state transitions when label_duration_sec is None"),
     )
     return output_npz, cue_table
 
@@ -1222,10 +1227,68 @@ def load_checkpoint(checkpoint_path: PathLike, device: Optional[Union[str, torch
     return model, checkpoint, device_obj
 
 
+def class_names_from_checkpoint(
+    checkpoint: Dict[str, Any],
+    fallback: Sequence[str] = (),
+) -> Tuple[str, ...]:
+    """Return class names from new or original signal_generator checkpoints."""
+
+    raw = checkpoint.get("class_names", None)
+    if isinstance(raw, dict):
+        def _sort_key(item):
+            key, _ = item
+            try:
+                return int(key)
+            except Exception:
+                return str(key)
+
+        names = tuple(str(value) for _, value in sorted(raw.items(), key=_sort_key))
+    elif raw is not None:
+        names = tuple(str(x) for x in np.asarray(raw).reshape(-1).tolist())
+    else:
+        names = tuple(str(x) for x in fallback)
+
+    num_classes = int(checkpoint.get("model_config", {}).get("num_classes", len(names)))
+    if len(names) < num_classes:
+        names = names + tuple(f"class_{i}" for i in range(len(names), num_classes))
+    return names
+
+
 def window_config_from_checkpoint(checkpoint: Dict[str, Any]) -> WindowConfig:
-    cfg = dict(checkpoint["window_config"])
-    cfg["bandpower_hz"] = tuple(cfg.get("bandpower_hz", (18.0, 22.0)))
-    return WindowConfig(**cfg)
+    """Return window settings from new or original signal_generator checkpoints."""
+
+    if "window_config" in checkpoint:
+        cfg = dict(checkpoint["window_config"])
+        cfg["bandpower_hz"] = tuple(cfg.get("bandpower_hz", (18.0, 22.0)))
+        return WindowConfig(**cfg)
+
+    saved_cfg = dict(checkpoint.get("config", {}))
+    fs = int(checkpoint.get("fs", saved_cfg.get("fs", 200)))
+    feature_mode = checkpoint.get("feature_mode", saved_cfg.get("feature_mode", "raw_signal"))
+    bandpower_hz = tuple(checkpoint.get("bandpower_hz", saved_cfg.get("bandpower_hz", (18.0, 22.0))))
+
+    if "window_sec" in saved_cfg:
+        window_sec = float(saved_cfg["window_sec"])
+    elif "window_samples" in checkpoint:
+        window_sec = float(checkpoint["window_samples"]) / float(fs)
+    else:
+        window_sec = 1.0
+
+    if "stride_sec" in saved_cfg:
+        stride_sec = float(saved_cfg["stride_sec"])
+    elif "stride_samples" in checkpoint:
+        stride_sec = float(checkpoint["stride_samples"]) / float(fs)
+    else:
+        stride_sec = 0.25
+
+    label_mode = checkpoint.get("label_mode", saved_cfg.get("label_mode", "endpoint"))
+    return WindowConfig(
+        feature_mode=str(feature_mode),
+        window_sec=window_sec,
+        stride_sec=stride_sec,
+        label_mode=str(label_mode),
+        bandpower_hz=bandpower_hz,
+    )
 
 
 def predict_labeled_recording(
@@ -1256,7 +1319,7 @@ def predict_labeled_recording(
     X = apply_normalizer(X_raw, checkpoint["normalizer_mean"], checkpoint["normalizer_std"])
     pred, prob = predict_array(model, X, batch_size=batch_size, device=device)
 
-    class_names = tuple(str(x) for x in checkpoint.get("class_names", rec["class_names"]))
+    class_names = class_names_from_checkpoint(checkpoint, fallback=rec["class_names"])
     summary, per_class = classification_summary(y_true, pred, class_names)
 
     pred_df = windows.copy()
@@ -1301,6 +1364,291 @@ def predict_labeled_recording(
     }
 
 
+def _prediction_probability_columns(prob: np.ndarray, class_names: Sequence[str]) -> Dict[str, np.ndarray]:
+    columns: Dict[str, np.ndarray] = {}
+    for label_idx in range(prob.shape[1]):
+        name = class_names[label_idx] if label_idx < len(class_names) else f"class_{label_idx}"
+        columns[f"prob_{name}"] = prob[:, label_idx]
+    return columns
+
+
+def evaluate_prediction_log_against_labeled_recording(
+    prediction_csv: PathLike,
+    labeled_npz: PathLike,
+    output_dir: PathLike,
+    checkpoint_path: Optional[PathLike] = None,
+) -> Dict[str, Any]:
+    """Score an existing real-time prediction CSV against audio-derived labels."""
+
+    output_dir = ensure_dir(output_dir)
+    prediction_csv = Path(prediction_csv)
+    rec = load_labeled_recording(labeled_npz)
+    pred_df = pd.read_csv(prediction_csv)
+
+    if len(pred_df) == 0:
+        pred_df["true_label"] = []
+        pred_df["correct"] = []
+        class_names = rec["class_names"]
+        summary = pd.DataFrame([{"n_windows": 0, "accuracy": np.nan, "balanced_accuracy": np.nan}])
+        per_class = pd.DataFrame()
+    else:
+        fs = int(rec["samplerate"])
+        labels = np.asarray(rec["sample_labels"], dtype=np.int64).reshape(-1)
+        if checkpoint_path is not None:
+            _, checkpoint, _ = load_checkpoint(checkpoint_path)
+            class_names = class_names_from_checkpoint(checkpoint, fallback=rec["class_names"])
+            default_window_samples = int(round(window_config_from_checkpoint(checkpoint).window_sec * fs))
+        else:
+            class_names = tuple(rec["class_names"])
+            default_window_samples = int(round(1.0 * fs))
+
+        true_values = []
+        valid_rows = []
+        for _, row in pred_df.iterrows():
+            end_sample = int(row["end_sample"])
+            window_samples = int(row.get("window_samples", default_window_samples))
+            start_sample = max(0, end_sample - window_samples)
+            if end_sample < 1 or end_sample > len(labels):
+                true_values.append(np.nan)
+                valid_rows.append(False)
+                continue
+            window = labels[start_sample:end_sample]
+            if len(window) == 0:
+                true_values.append(np.nan)
+                valid_rows.append(False)
+            else:
+                true_values.append(int(window[-1]))
+                valid_rows.append(True)
+
+        pred_df = pred_df.copy()
+        pred_df["true_label"] = true_values
+        pred_df["valid_true_label"] = valid_rows
+        valid = pred_df[pred_df["valid_true_label"].astype(bool)].copy()
+        if len(valid):
+            y_true = valid["true_label"].astype(int).to_numpy()
+            y_pred = valid["pred_label"].astype(int).to_numpy()
+            summary, per_class = classification_summary(y_true, y_pred, class_names)
+            pred_df["correct"] = np.nan
+            pred_df.loc[valid.index, "correct"] = y_true == y_pred
+        else:
+            summary = pd.DataFrame([{"n_windows": int(len(pred_df)), "accuracy": np.nan, "balanced_accuracy": np.nan}])
+            per_class = pd.DataFrame()
+            pred_df["correct"] = np.nan
+
+    delay_df = estimate_transition_delay(
+        pred_df[pred_df.get("valid_true_label", True).astype(bool)] if "valid_true_label" in pred_df else pred_df,
+        sample_labels=rec["sample_labels"],
+        fs=int(rec["samplerate"]),
+    )
+    delay_summary = summarize_transition_delay(delay_df)
+
+    stem = Path(labeled_npz).stem
+    evaluated_csv = output_dir / f"{stem}_realtime_predictions_evaluated.csv"
+    summary_csv = output_dir / f"{stem}_realtime_summary.csv"
+    per_class_csv = output_dir / f"{stem}_realtime_per_class.csv"
+    delay_csv = output_dir / f"{stem}_realtime_delay_by_transition.csv"
+    delay_summary_csv = output_dir / f"{stem}_realtime_delay_summary.csv"
+
+    pred_df.to_csv(evaluated_csv, index=False)
+    summary.to_csv(summary_csv, index=False)
+    per_class.to_csv(per_class_csv, index=False)
+    delay_df.to_csv(delay_csv, index=False)
+    delay_summary.to_csv(delay_summary_csv, index=False)
+
+    return {
+        "evaluated_predictions": pred_df,
+        "summary": summary,
+        "per_class": per_class,
+        "delay": delay_df,
+        "delay_summary": delay_summary,
+        "evaluated_csv": evaluated_csv,
+        "summary_csv": summary_csv,
+        "per_class_csv": per_class_csv,
+        "delay_csv": delay_csv,
+        "delay_summary_csv": delay_summary_csv,
+    }
+
+
+def run_realtime_mp150_prediction(
+    output_dir: PathLike,
+    checkpoint_path: PathLike,
+    acquisition_config: AcquisitionConfig,
+    preprocess_config: PreprocessConfig,
+    duration_sec: Optional[float] = 60.0,
+    trial_name: str = "realtime_trial",
+    print_every_prediction: bool = True,
+) -> Dict[str, Any]:
+    """Stream MP150 data and emit causal model predictions in real time.
+
+    The full raw trial is also saved so the audio channel can be used later for
+    posthoc labeling and scoring.
+    """
+
+    output_dir = ensure_dir(output_dir)
+    raw_path = output_dir / f"{trial_name}_raw.npz"
+    prediction_csv = output_dir / f"{trial_name}_realtime_predictions.csv"
+
+    model, checkpoint, device = load_checkpoint(checkpoint_path)
+    win_cfg = window_config_from_checkpoint(checkpoint)
+    fs = int(checkpoint["fs"])
+    if int(acquisition_config.samplerate) != fs:
+        raise ValueError(
+            f"Samplerate mismatch: acquisition fs={acquisition_config.samplerate}, checkpoint fs={fs}."
+        )
+
+    window_samples = int(round(float(win_cfg.window_sec) * fs))
+    stride_samples = int(round(float(win_cfg.stride_sec) * fs))
+    class_names = class_names_from_checkpoint(checkpoint)
+    if stride_samples <= 0 or window_samples <= 0:
+        raise ValueError("window_sec and stride_sec must produce positive sample counts.")
+
+    MP150 = _import_mp150_class()
+    mp = MP150(samplerate=fs, channels=list(acquisition_config.channels))
+
+    fieldnames = [
+        "wall_time_sec",
+        "end_sample",
+        "end_time_sec",
+        "pred_label",
+        "window_samples",
+        "stride_samples",
+        "feature_mode",
+    ] + [f"prob_{name}" for name in class_names]
+
+    raw_chunks: List[np.ndarray] = []
+    chunk_start_wall: List[float] = []
+    chunk_end_wall: List[float] = []
+    prediction_rows: List[Dict[str, Any]] = []
+    eeg_buffer = np.empty((0, len(preprocess_config.eeg_channels)), dtype=np.float32)
+    buffer_start_sample = 0
+    total_samples_seen = 0
+    next_prediction_end = window_samples
+    start_wall = time.time()
+
+    prediction_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(prediction_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        try:
+            while duration_sec is None or (time.time() - start_wall) < float(duration_sec):
+                elapsed = time.time() - start_wall
+                if duration_sec is not None:
+                    remaining = float(duration_sec) - elapsed
+                    if remaining <= 0:
+                        break
+                    request_sec = min(float(acquisition_config.chunk_sec), max(remaining, 1.0 / fs))
+                else:
+                    request_sec = float(acquisition_config.chunk_sec)
+
+                chunk_start_wall.append(time.time() - start_wall)
+                chunk = _as_2d_samples_channels(mp.get_chunk(request_sec))
+                chunk_end_wall.append(time.time() - start_wall)
+                raw_chunks.append(chunk.astype(np.float32))
+
+                eeg_raw = extract_hardware_channels(
+                    chunk, acquisition_config.channels, preprocess_config.eeg_channels
+                )
+                eeg_buffer = np.concatenate([eeg_buffer, eeg_raw.astype(np.float32)], axis=0)
+                total_samples_seen += int(chunk.shape[0])
+
+                while next_prediction_end <= total_samples_seen:
+                    window_start_global = next_prediction_end - window_samples
+                    local_start = window_start_global - buffer_start_sample
+                    local_end = next_prediction_end - buffer_start_sample
+                    if local_start < 0 or local_end > len(eeg_buffer):
+                        break
+
+                    raw_window = eeg_buffer[local_start:local_end]
+                    model_window = preprocess_eeg_signal(
+                        raw_window,
+                        fs=fs,
+                        preprocess_config=preprocess_config,
+                    )
+                    X_raw = extract_window_features(model_window, fs=fs, config=win_cfg)[None, ...]
+                    X = apply_normalizer(X_raw, checkpoint["normalizer_mean"], checkpoint["normalizer_std"])
+                    pred, prob = predict_array(model, X, batch_size=1, device=device)
+
+                    row = {
+                        "wall_time_sec": time.time() - start_wall,
+                        "end_sample": int(next_prediction_end),
+                        "end_time_sec": float(next_prediction_end) / float(fs),
+                        "pred_label": int(pred[0]),
+                        "window_samples": int(window_samples),
+                        "stride_samples": int(stride_samples),
+                        "feature_mode": win_cfg.feature_mode,
+                    }
+                    for key, value in _prediction_probability_columns(prob, class_names).items():
+                        row[key] = float(value[0])
+                    writer.writerow(row)
+                    f.flush()
+                    prediction_rows.append(row)
+
+                    if print_every_prediction:
+                        print(
+                            f"t={row['end_time_sec']:.3f}s pred={row['pred_label']} "
+                            f"wall={row['wall_time_sec']:.3f}s"
+                        )
+                    next_prediction_end += stride_samples
+
+                keep_from_global = max(0, next_prediction_end - window_samples)
+                drop = keep_from_global - buffer_start_sample
+                if drop > 0:
+                    eeg_buffer = eeg_buffer[drop:]
+                    buffer_start_sample = keep_from_global
+        finally:
+            mp.close()
+
+    raw_data = np.concatenate(raw_chunks, axis=0).astype(np.float32) if raw_chunks else np.empty(
+        (0, len(acquisition_config.channels)), dtype=np.float32
+    )
+    np.savez(
+        raw_path,
+        data=raw_data,
+        samplerate=np.array(fs, dtype=np.int64),
+        channels=np.asarray(acquisition_config.channels, dtype=np.int64),
+        time_sec=np.arange(raw_data.shape[0], dtype=np.float64) / float(fs),
+        segment_name=np.array(str(trial_name)),
+        chunk_start_wall_sec=np.asarray(chunk_start_wall, dtype=np.float64),
+        chunk_end_wall_sec=np.asarray(chunk_end_wall, dtype=np.float64),
+        requested_duration_sec=np.array(np.nan if duration_sec is None else float(duration_sec), dtype=np.float64),
+        created_at=np.array(_now_string()),
+        metadata_json=np.array(json.dumps({"mode": "realtime_prediction", "checkpoint_path": str(checkpoint_path)})),
+    )
+
+    return {
+        "raw_path": raw_path,
+        "prediction_csv": prediction_csv,
+        "predictions": pd.DataFrame(prediction_rows),
+    }
+
+
+def posthoc_analyze_realtime_trial(
+    raw_npz: PathLike,
+    prediction_csv: PathLike,
+    checkpoint_path: PathLike,
+    output_dir: PathLike,
+    preprocess_config: PreprocessConfig,
+    label_config: AudioLabelConfig,
+) -> Dict[str, Any]:
+    """Label a streamed raw trial from audio and score the real-time predictions."""
+
+    output_dir = ensure_dir(output_dir)
+    raw_npz = Path(raw_npz)
+    labeled_npz = output_dir / f"{raw_npz.stem}_labeled.npz"
+    preprocess_recording(raw_npz, labeled_npz, preprocess_config, label_config)
+    result = evaluate_prediction_log_against_labeled_recording(
+        prediction_csv=prediction_csv,
+        labeled_npz=labeled_npz,
+        output_dir=output_dir,
+        checkpoint_path=checkpoint_path,
+    )
+    result["labeled_path"] = labeled_npz
+    result["raw_path"] = raw_npz
+    result["prediction_csv"] = Path(prediction_csv)
+    return result
+
+
 def collect_preprocess_and_test_trial(
     output_dir: PathLike,
     checkpoint_path: PathLike,
@@ -1310,17 +1658,27 @@ def collect_preprocess_and_test_trial(
     duration_sec: float = 60.0,
     trial_name: str = "test_trial",
 ) -> Dict[str, Any]:
-    """Collect an arbitrary-length trial, label it from audio, and test it."""
+    """Collect a trial, run real-time predictions, then label and score posthoc."""
 
-    output_dir = ensure_dir(output_dir)
-    raw_path = output_dir / f"{trial_name}_raw.npz"
-    labeled_path = output_dir / f"{trial_name}_labeled.npz"
-    collect_mp150_recording(raw_path, duration_sec, acquisition_config, segment_name=trial_name)
-    preprocess_recording(raw_path, labeled_path, preprocess_config, label_config)
-    result = predict_labeled_recording(labeled_path, checkpoint_path, output_dir=output_dir)
-    result["raw_path"] = raw_path
-    result["labeled_path"] = labeled_path
-    return result
+    realtime = run_realtime_mp150_prediction(
+        output_dir=output_dir,
+        checkpoint_path=checkpoint_path,
+        acquisition_config=acquisition_config,
+        preprocess_config=preprocess_config,
+        duration_sec=duration_sec,
+        trial_name=trial_name,
+        print_every_prediction=True,
+    )
+    analysis = posthoc_analyze_realtime_trial(
+        raw_npz=realtime["raw_path"],
+        prediction_csv=realtime["prediction_csv"],
+        checkpoint_path=checkpoint_path,
+        output_dir=output_dir,
+        preprocess_config=preprocess_config,
+        label_config=label_config,
+    )
+    analysis["realtime_predictions"] = realtime["predictions"]
+    return analysis
 
 
 # ---------------------------------------------------------------------------
