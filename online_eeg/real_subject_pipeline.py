@@ -12,6 +12,8 @@ import csv
 import json
 import os
 import random
+import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -208,6 +210,41 @@ def extract_hardware_channels(
     return arr[:, idx].astype(np.float32)
 
 
+def _duration_to_sample_count(duration_sec: float, samplerate: int, name: str = "duration_sec") -> int:
+    samplerate = int(samplerate)
+    if samplerate <= 0:
+        raise ValueError("samplerate must be positive.")
+    if float(duration_sec) <= 0:
+        raise ValueError(f"{name} must be positive.")
+    return max(1, int(round(float(duration_sec) * samplerate)))
+
+
+def _checked_acquisition_chunk(chunk: np.ndarray, expected_channels: int) -> np.ndarray:
+    arr = _as_2d_samples_channels(chunk)
+    if arr.shape[1] != int(expected_channels):
+        raise ValueError(
+            f"Expected acquired chunk with {expected_channels} channels, got shape {arr.shape}."
+        )
+    if arr.shape[0] == 0:
+        raise RuntimeError("MP150 returned an empty chunk; cannot continue acquisition.")
+    return arr
+
+
+def _print_recording_elapsed(
+    start_wall: float,
+    duration_sec: float,
+    stop_event: threading.Event,
+    interval_sec: float = 1.0,
+) -> None:
+    while not stop_event.wait(float(interval_sec)):
+        elapsed = max(0.0, time.time() - float(start_wall))
+        shown_elapsed = min(elapsed, float(duration_sec))
+        sys.stdout.write(
+            f"\rElapsed since recording start: {shown_elapsed:6.1f}s / {float(duration_sec):.1f}s"
+        )
+        sys.stdout.flush()
+
+
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
@@ -231,51 +268,74 @@ def collect_mp150_recording(
     """Collect one MP150 recording and save it as a raw NPZ.
 
     Saved key ``data`` has shape ``(samples, channels)`` and uses the hardware
-    channel order in ``config.channels``.
+    channel order in ``config.channels``. Fixed-duration recordings are one
+    hardware chunk whose length is ``duration_sec``.
     """
 
     output_npz = Path(output_npz)
     output_npz.parent.mkdir(parents=True, exist_ok=True)
 
-    if duration_sec <= 0:
-        raise ValueError("duration_sec must be positive.")
-    if config.chunk_sec <= 0:
-        raise ValueError("config.chunk_sec must be positive.")
+    sample_rate = int(config.samplerate)
+    channels = tuple(int(ch) for ch in config.channels)
+    if not channels:
+        raise ValueError("config.channels must contain at least one channel.")
+    target_samples = _duration_to_sample_count(duration_sec, sample_rate)
 
     MP150 = _import_mp150_class()
-    mp = MP150(samplerate=int(config.samplerate), channels=list(config.channels))
+    mp = MP150(samplerate=sample_rate, channels=list(channels))
 
-    chunks: List[np.ndarray] = []
     chunk_start_wall: List[float] = []
     chunk_end_wall: List[float] = []
 
     start_wall = time.time()
+    segment_label = str(segment_name).strip() or output_npz.stem
+    print(
+        f"Recording started: {segment_label} at {_now_string()} "
+        f"({float(duration_sec):.1f}s, channels={channels})",
+        flush=True,
+    )
+    stop_progress = threading.Event()
+    progress_thread = threading.Thread(
+        target=_print_recording_elapsed,
+        args=(start_wall, float(duration_sec), stop_progress),
+        daemon=True,
+    )
+    progress_thread.start()
     try:
-        while True:
-            elapsed = time.time() - start_wall
-            remaining = float(duration_sec) - elapsed
-            if remaining <= 0:
-                break
-
-            request_sec = min(float(config.chunk_sec), max(remaining, 1.0 / config.samplerate))
-            chunk_start_wall.append(time.time() - start_wall)
-            chunk = mp.get_chunk(request_sec)
-            chunk_end_wall.append(time.time() - start_wall)
-            chunks.append(_as_2d_samples_channels(chunk))
+        chunk_start_wall.append(time.time() - start_wall)
+        data = _checked_acquisition_chunk(mp.get_chunk(float(duration_sec)), len(channels))
+        chunk_end_wall.append(time.time() - start_wall)
     finally:
+        stop_progress.set()
+        progress_thread.join(timeout=2.0)
+        elapsed = max(0.0, time.time() - start_wall)
+        sys.stdout.write(
+            f"\rElapsed since recording start: {min(elapsed, float(duration_sec)):6.1f}s / "
+            f"{float(duration_sec):.1f}s\n"
+        )
+        sys.stdout.flush()
         mp.close()
+        print(
+            f"Recording ended: {segment_label} at {_now_string()} "
+            f"(elapsed {elapsed:.1f}s)",
+            flush=True,
+        )
 
-    if chunks:
-        data = np.concatenate(chunks, axis=0).astype(np.float32)
-    else:
-        data = np.empty((0, len(config.channels)), dtype=np.float32)
+    if data.shape[0] < target_samples:
+        raise RuntimeError(
+            f"Expected one {duration_sec:.3f}s chunk with {target_samples} samples, "
+            f"got {data.shape[0]} samples."
+        )
+    if data.shape[0] > target_samples:
+        data = data[:target_samples]
+    data = data.astype(np.float32)
 
-    time_sec = np.arange(data.shape[0], dtype=np.float64) / float(config.samplerate)
+    time_sec = np.arange(data.shape[0], dtype=np.float64) / float(sample_rate)
     np.savez(
         output_npz,
         data=data,
-        samplerate=np.array(int(config.samplerate), dtype=np.int64),
-        channels=np.asarray(config.channels, dtype=np.int64),
+        samplerate=np.array(sample_rate, dtype=np.int64),
+        channels=np.asarray(channels, dtype=np.int64),
         time_sec=time_sec,
         segment_name=np.array(str(segment_name)),
         chunk_start_wall_sec=np.asarray(chunk_start_wall, dtype=np.float64),
@@ -734,6 +794,11 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
     class_names = tuple(str(x) for x in labeled["class_names"]) if "class_names" in labeled.files else tuple()
     return {
         "eeg": eeg[:n].astype(np.float32),
+        "eeg_raw": (
+            _as_2d_samples_channels(labeled["eeg_raw"])[:n].astype(np.float32)
+            if "eeg_raw" in labeled.files
+            else None
+        ),
         "sample_labels": labels[:n].astype(np.int64),
         "samplerate": int(np.asarray(labeled["samplerate"]).item()),
         "class_names": class_names,
@@ -742,6 +807,17 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         "audio": np.asarray(labeled["audio"], dtype=np.float32).reshape(-1)[:n] if "audio" in labeled.files else None,
         "audio_envelope": np.asarray(labeled["audio_envelope"], dtype=np.float64).reshape(-1)[:n] if "audio_envelope" in labeled.files else None,
         "audio_threshold": float(np.asarray(labeled["audio_threshold"]).item()) if "audio_threshold" in labeled.files else None,
+        "acquired_channels": (
+            tuple(int(x) for x in np.asarray(labeled["acquired_channels"]).reshape(-1))
+            if "acquired_channels" in labeled.files
+            else tuple()
+        ),
+        "eeg_channels": (
+            tuple(int(x) for x in np.asarray(labeled["eeg_channels"]).reshape(-1))
+            if "eeg_channels" in labeled.files
+            else tuple()
+        ),
+        "audio_channel": int(np.asarray(labeled["audio_channel"]).item()) if "audio_channel" in labeled.files else None,
     }
 
 
@@ -1469,6 +1545,164 @@ def evaluate_prediction_log_against_labeled_recording(
     }
 
 
+def _setup_realtime_plot(
+    acquired_channels: Sequence[int],
+    class_names: Sequence[str],
+) -> Dict[str, Any]:
+    import matplotlib.pyplot as plt
+
+    plt.ion()
+    n_channels = len(acquired_channels)
+    fig, axes = plt.subplots(
+        n_channels + 1,
+        1,
+        sharex=True,
+        figsize=(14, max(4.0, 1.45 * (n_channels + 1))),
+        squeeze=False,
+    )
+    axes_flat = axes.reshape(-1)
+
+    channel_lines = []
+    for ax, channel in zip(axes_flat[:-1], acquired_channels):
+        line, = ax.plot([], [], linewidth=0.7)
+        channel_lines.append(line)
+        ax.set_ylabel(f"Ch {int(channel)}")
+        ax.grid(True, alpha=0.3)
+
+    pred_line, = axes_flat[-1].step([], [], where="post", linewidth=1.8, color="tab:red")
+    axes_flat[-1].set_ylabel("Prediction")
+    axes_flat[-1].set_xlabel("Time (s)")
+    axes_flat[-1].grid(True, alpha=0.3)
+    if class_names:
+        axes_flat[-1].set_yticks(np.arange(len(class_names)))
+        axes_flat[-1].set_yticklabels([str(name) for name in class_names])
+        axes_flat[-1].set_ylim(-0.5, max(0.5, len(class_names) - 0.5))
+
+    axes_flat[0].set_title("Realtime channels and prediction")
+    plt.tight_layout()
+
+    display_handle = None
+    try:
+        from IPython import get_ipython
+
+        if get_ipython() is not None:
+            from IPython.display import display
+
+            display_handle = display(fig, display_id=True)
+    except Exception:
+        display_handle = None
+
+    if display_handle is None:
+        try:
+            backend = str(plt.get_backend()).lower()
+            if "agg" not in backend:
+                fig.show()
+        except Exception:
+            pass
+
+    return {
+        "fig": fig,
+        "axes": axes_flat,
+        "channel_lines": channel_lines,
+        "prediction_line": pred_line,
+        "display_handle": display_handle,
+        "plt": plt,
+    }
+
+
+def _set_signal_axis_limits(ax: Any, trace: np.ndarray) -> None:
+    finite = np.asarray(trace, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return
+    ymin = float(np.min(finite))
+    ymax = float(np.max(finite))
+    if np.isclose(ymin, ymax):
+        pad = max(1.0, abs(ymin) * 0.1)
+    else:
+        pad = (ymax - ymin) * 0.1
+    ax.set_ylim(ymin - pad, ymax + pad)
+
+
+def _update_realtime_plot(
+    plot_state: Optional[Dict[str, Any]],
+    raw_data: np.ndarray,
+    fs: int,
+    prediction_rows: Sequence[Dict[str, Any]],
+    class_names: Sequence[str],
+    live_plot_window_sec: Optional[float],
+) -> None:
+    if plot_state is None:
+        return
+
+    raw = _as_2d_samples_channels(raw_data)
+    if raw.shape[0] == 0:
+        return
+
+    axes = plot_state["axes"]
+    end_time = raw.shape[0] / float(fs)
+    if live_plot_window_sec is None:
+        start_time = 0.0
+    else:
+        start_time = max(0.0, end_time - float(live_plot_window_sec))
+    start_sample = max(0, int(np.floor(start_time * int(fs))))
+    t = np.arange(start_sample, raw.shape[0], dtype=np.float64) / float(fs)
+    visible = raw[start_sample:]
+
+    for idx, line in enumerate(plot_state["channel_lines"]):
+        if idx >= visible.shape[1]:
+            line.set_data([], [])
+            continue
+        line.set_data(t, visible[:, idx])
+        _set_signal_axis_limits(axes[idx], visible[:, idx])
+
+    pred_times = []
+    pred_labels = []
+    previous_label = None
+    for row in prediction_rows:
+        row_time = float(row["end_time_sec"])
+        row_label = int(row["pred_label"])
+        if row_time < start_time:
+            previous_label = row_label
+            continue
+        pred_times.append(row_time)
+        pred_labels.append(row_label)
+
+    if previous_label is not None:
+        pred_times.insert(0, start_time)
+        pred_labels.insert(0, previous_label)
+
+    pred_line = plot_state["prediction_line"]
+    pred_line.set_data(np.asarray(pred_times, dtype=np.float64), np.asarray(pred_labels, dtype=np.float64))
+    if class_names:
+        axes[-1].set_ylim(-0.5, max(0.5, len(class_names) - 0.5))
+    elif pred_labels:
+        ymin = min(pred_labels)
+        ymax = max(pred_labels)
+        axes[-1].set_ylim(float(ymin) - 0.5, float(ymax) + 0.5)
+
+    if end_time <= start_time:
+        end_time = start_time + 1.0
+    for ax in axes:
+        ax.set_xlim(start_time, end_time)
+
+    fig = plot_state["fig"]
+    fig.canvas.draw_idle()
+    display_handle = plot_state.get("display_handle")
+    if display_handle is not None:
+        try:
+            display_handle.update(fig)
+        except Exception:
+            pass
+    if display_handle is None:
+        try:
+            backend = str(plot_state["plt"].get_backend()).lower()
+            if "agg" not in backend:
+                plot_state["plt"].pause(0.001)
+        except Exception:
+            pass
+
+
 def run_realtime_mp150_prediction(
     output_dir: PathLike,
     checkpoint_path: PathLike,
@@ -1477,6 +1711,9 @@ def run_realtime_mp150_prediction(
     duration_sec: Optional[float] = 60.0,
     trial_name: str = "realtime_trial",
     print_every_prediction: bool = True,
+    live_plot: bool = False,
+    live_plot_window_sec: Optional[float] = 15.0,
+    live_plot_update_sec: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Stream MP150 data and emit causal model predictions in real time.
 
@@ -1495,15 +1732,29 @@ def run_realtime_mp150_prediction(
         raise ValueError(
             f"Samplerate mismatch: acquisition fs={acquisition_config.samplerate}, checkpoint fs={fs}."
         )
+    acquired_channels = tuple(int(ch) for ch in acquisition_config.channels)
+    if not acquired_channels:
+        raise ValueError("acquisition_config.channels must contain at least one channel.")
+    chunk_samples = _duration_to_sample_count(
+        acquisition_config.chunk_sec, fs, "acquisition_config.chunk_sec"
+    )
+    target_samples = (
+        _duration_to_sample_count(duration_sec, fs)
+        if duration_sec is not None
+        else None
+    )
 
     window_samples = int(round(float(win_cfg.window_sec) * fs))
     stride_samples = int(round(float(win_cfg.stride_sec) * fs))
     class_names = class_names_from_checkpoint(checkpoint)
     if stride_samples <= 0 or window_samples <= 0:
         raise ValueError("window_sec and stride_sec must produce positive sample counts.")
+    plot_update_sec = float(win_cfg.stride_sec if live_plot_update_sec is None else live_plot_update_sec)
+    if live_plot and plot_update_sec <= 0:
+        raise ValueError("live_plot_update_sec must be positive.")
 
     MP150 = _import_mp150_class()
-    mp = MP150(samplerate=fs, channels=list(acquisition_config.channels))
+    mp = MP150(samplerate=fs, channels=list(acquired_channels))
 
     fieldnames = [
         "wall_time_sec",
@@ -1524,6 +1775,8 @@ def run_realtime_mp150_prediction(
     total_samples_seen = 0
     next_prediction_end = window_samples
     start_wall = time.time()
+    live_plot_state = _setup_realtime_plot(acquired_channels, class_names) if live_plot else None
+    last_live_plot_wall = 0.0
 
     prediction_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(prediction_csv, "w", newline="") as f:
@@ -1531,23 +1784,27 @@ def run_realtime_mp150_prediction(
         writer.writeheader()
 
         try:
-            while duration_sec is None or (time.time() - start_wall) < float(duration_sec):
-                elapsed = time.time() - start_wall
-                if duration_sec is not None:
-                    remaining = float(duration_sec) - elapsed
-                    if remaining <= 0:
+            while target_samples is None or total_samples_seen < target_samples:
+                if target_samples is not None:
+                    remaining_samples = target_samples - total_samples_seen
+                    if remaining_samples <= 0:
                         break
-                    request_sec = min(float(acquisition_config.chunk_sec), max(remaining, 1.0 / fs))
+                    request_samples = min(chunk_samples, remaining_samples)
+                    request_sec = request_samples / float(fs)
                 else:
                     request_sec = float(acquisition_config.chunk_sec)
 
                 chunk_start_wall.append(time.time() - start_wall)
-                chunk = _as_2d_samples_channels(mp.get_chunk(request_sec))
+                chunk = _checked_acquisition_chunk(mp.get_chunk(request_sec), len(acquired_channels))
                 chunk_end_wall.append(time.time() - start_wall)
+                if target_samples is not None:
+                    remaining_samples = target_samples - total_samples_seen
+                    if chunk.shape[0] > remaining_samples:
+                        chunk = chunk[:remaining_samples]
                 raw_chunks.append(chunk.astype(np.float32))
 
                 eeg_raw = extract_hardware_channels(
-                    chunk, acquisition_config.channels, preprocess_config.eeg_channels
+                    chunk, acquired_channels, preprocess_config.eeg_channels
                 )
                 eeg_buffer = np.concatenate([eeg_buffer, eeg_raw.astype(np.float32)], axis=0)
                 total_samples_seen += int(chunk.shape[0])
@@ -1596,17 +1853,39 @@ def run_realtime_mp150_prediction(
                 if drop > 0:
                     eeg_buffer = eeg_buffer[drop:]
                     buffer_start_sample = keep_from_global
+
+                if live_plot_state is not None:
+                    now_wall = time.time()
+                    if now_wall - last_live_plot_wall >= plot_update_sec:
+                        _update_realtime_plot(
+                            live_plot_state,
+                            np.concatenate(raw_chunks, axis=0),
+                            fs=fs,
+                            prediction_rows=prediction_rows,
+                            class_names=class_names,
+                            live_plot_window_sec=live_plot_window_sec,
+                        )
+                        last_live_plot_wall = now_wall
         finally:
             mp.close()
+            if live_plot_state is not None and raw_chunks:
+                _update_realtime_plot(
+                    live_plot_state,
+                    np.concatenate(raw_chunks, axis=0),
+                    fs=fs,
+                    prediction_rows=prediction_rows,
+                    class_names=class_names,
+                    live_plot_window_sec=live_plot_window_sec,
+                )
 
     raw_data = np.concatenate(raw_chunks, axis=0).astype(np.float32) if raw_chunks else np.empty(
-        (0, len(acquisition_config.channels)), dtype=np.float32
+        (0, len(acquired_channels)), dtype=np.float32
     )
     np.savez(
         raw_path,
         data=raw_data,
         samplerate=np.array(fs, dtype=np.int64),
-        channels=np.asarray(acquisition_config.channels, dtype=np.int64),
+        channels=np.asarray(acquired_channels, dtype=np.int64),
         time_sec=np.arange(raw_data.shape[0], dtype=np.float64) / float(fs),
         segment_name=np.array(str(trial_name)),
         chunk_start_wall_sec=np.asarray(chunk_start_wall, dtype=np.float64),
@@ -1801,7 +2080,11 @@ def plot_labeled_recording(labeled_npz: PathLike, max_duration_sec: Optional[flo
     import matplotlib.pyplot as plt
 
     rec = load_labeled_recording(labeled_npz)
-    eeg = rec["eeg"]
+    eeg = rec["eeg_raw"] if rec.get("eeg_raw") is not None else rec["eeg"]
+    audio = rec.get("audio")
+    acquired_channels = tuple(rec.get("acquired_channels") or ())
+    eeg_channels = tuple(rec.get("eeg_channels") or range(1, eeg.shape[1] + 1))
+    audio_channel = rec.get("audio_channel")
     labels = rec["sample_labels"]
     fs = int(rec["samplerate"])
     n = len(labels)
@@ -1809,16 +2092,36 @@ def plot_labeled_recording(labeled_npz: PathLike, max_duration_sec: Optional[flo
         n = min(n, int(round(float(max_duration_sec) * fs)))
     t = np.arange(n) / float(fs)
 
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(t, eeg[:n, 0], linewidth=0.8, label="EEG channel 1")
-    ax.step(t, labels[:n], where="post", linewidth=1.0, label="sample label")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Amplitude / label")
-    ax.set_title(f"Labeled recording: {Path(labeled_npz).name}")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    channel_traces: List[Tuple[int, str, np.ndarray]] = []
+    for idx in range(eeg.shape[1]):
+        hardware_channel = int(eeg_channels[idx]) if idx < len(eeg_channels) else idx + 1
+        channel_traces.append((hardware_channel, f"EEG channel {hardware_channel}", eeg[:n, idx]))
+    if audio is not None:
+        hardware_channel = int(audio_channel) if audio_channel is not None else len(channel_traces) + 1
+        channel_traces.append((hardware_channel, f"Audio channel {hardware_channel}", np.asarray(audio)[:n]))
+
+    if acquired_channels:
+        channel_order = {int(ch): idx for idx, ch in enumerate(acquired_channels)}
+        channel_traces.sort(key=lambda item: channel_order.get(int(item[0]), int(item[0])))
+    else:
+        channel_traces.sort(key=lambda item: int(item[0]))
+
+    fig, axes = plt.subplots(
+        len(channel_traces),
+        1,
+        sharex=True,
+        figsize=(14, max(2.5, 1.6 * len(channel_traces))),
+        squeeze=False,
+    )
+    axes_flat = axes.reshape(-1)
+    for ax, (_, label, trace) in zip(axes_flat, channel_traces):
+        ax.plot(t, trace, linewidth=0.7)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    axes_flat[-1].set_xlabel("Time (s)")
+    axes_flat[0].set_title(f"Recording channels: {Path(labeled_npz).name}")
     plt.tight_layout()
-    return fig, ax
+    return fig, axes_flat
 
 
 def plot_predictions_overlay(

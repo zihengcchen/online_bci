@@ -52,7 +52,9 @@ class MP150:
         Returns:
             np.ndarray of shape (n_samples, num_channels)
         """
-        n_samples = int(round(self._samplerate * duration_sec))
+        if duration_sec <= 0:
+            raise ValueError("duration_sec must be positive.")
+        n_samples = max(1, int(round(self._samplerate * duration_sec)))
         total_vals = n_samples * self._num_ch
         buf = (c_double * total_vals)()
         received = c_uint(0)
@@ -64,7 +66,16 @@ class MP150:
         if received.value != total_vals:
             print(f"Warning: Only received {received.value}/{total_vals} values")
 
-        arr = np.ctypeslib.as_array(buf)
+        received_vals = min(int(received.value), total_vals)
+        complete_vals = received_vals - (received_vals % self._num_ch)
+        if complete_vals != received_vals:
+            print(
+                f"Warning: Dropping {received_vals - complete_vals} incomplete channel values"
+            )
+        if complete_vals == 0:
+            return np.empty((0, self._num_ch), dtype=np.float64)
+
+        arr = np.ctypeslib.as_array(buf)[:complete_vals].copy()
         return arr.reshape((-1, self._num_ch))
 
     def close(self):
