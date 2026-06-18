@@ -1452,6 +1452,23 @@ def _prediction_probability_columns(prob: np.ndarray, class_names: Sequence[str]
     return columns
 
 
+def _format_realtime_prediction_status(row: Dict[str, Any], class_names: Sequence[str]) -> str:
+    pred_label = int(row["pred_label"])
+    pred_name = class_names[pred_label] if 0 <= pred_label < len(class_names) else f"class_{pred_label}"
+    probability_parts = []
+    for label_idx, name in enumerate(class_names):
+        key = f"prob_{name}"
+        if key in row:
+            probability_parts.append(f"{name}={float(row[key]):.3f}")
+        else:
+            probability_parts.append(f"class_{label_idx}=nan")
+    return (
+        f"t={float(row['end_time_sec']):7.2f}s "
+        f"pred={pred_label} ({pred_name}) "
+        f"probabilities: {', '.join(probability_parts)}"
+    )
+
+
 def evaluate_prediction_log_against_labeled_recording(
     prediction_csv: PathLike,
     labeled_npz: PathLike,
@@ -1782,6 +1799,13 @@ def run_realtime_mp150_prediction(
     start_wall = time.time()
     live_plot_state = _setup_realtime_plot(acquired_channels, class_names) if live_plot else None
     last_live_plot_wall = 0.0
+    printed_prediction_line = False
+
+    print(
+        f"Realtime prediction: feature_mode={win_cfg.feature_mode}, "
+        f"window={float(win_cfg.window_sec):.3f}s, stride={float(win_cfg.stride_sec):.3f}s",
+        flush=True,
+    )
 
     prediction_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(prediction_csv, "w", newline="") as f:
@@ -1847,10 +1871,10 @@ def run_realtime_mp150_prediction(
                     prediction_rows.append(row)
 
                     if print_every_prediction:
-                        print(
-                            f"t={row['end_time_sec']:.3f}s pred={row['pred_label']} "
-                            f"wall={row['wall_time_sec']:.3f}s"
-                        )
+                        status = _format_realtime_prediction_status(row, class_names)
+                        sys.stdout.write("\r" + status.ljust(160))
+                        sys.stdout.flush()
+                        printed_prediction_line = True
                     next_prediction_end += stride_samples
 
                 keep_from_global = max(0, next_prediction_end - window_samples)
@@ -1872,6 +1896,9 @@ def run_realtime_mp150_prediction(
                         )
                         last_live_plot_wall = now_wall
         finally:
+            if printed_prediction_line:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
             mp.close()
             if live_plot_state is not None and raw_chunks:
                 _update_realtime_plot(
@@ -2133,12 +2160,13 @@ def plot_predictions_overlay(
     labeled_npz: PathLike,
     predictions: Union[pd.DataFrame, PathLike],
     max_duration_sec: Optional[float] = None,
+    channel_names: Sequence[str] = ("O1", "Oz", "O2", "POz"),
 ):
     import matplotlib.pyplot as plt
 
     rec = load_labeled_recording(labeled_npz)
     pred_df = pd.read_csv(predictions) if not isinstance(predictions, pd.DataFrame) else predictions.copy()
-    eeg = rec["eeg"]
+    eeg = rec["eeg_raw"] if rec.get("eeg_raw") is not None else rec["eeg"]
     labels = rec["sample_labels"]
     fs = int(rec["samplerate"])
 
@@ -2148,17 +2176,54 @@ def plot_predictions_overlay(
         pred_df = pred_df[pred_df["end_time_sec"] <= float(max_duration_sec)].copy()
 
     t = np.arange(n) / float(fs)
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(t, eeg[:n, 0], linewidth=0.7, label="EEG channel 1")
-    ax.step(t, labels[:n], where="post", linewidth=1.0, label="true label")
+    n_channels = min(4, eeg.shape[1])
+    fig, axes = plt.subplots(
+        n_channels,
+        1,
+        sharex=True,
+        figsize=(14, max(3.0, 1.8 * n_channels)),
+        squeeze=False,
+    )
+    axes_flat = axes.reshape(-1)
+
+    class_names = tuple(rec.get("class_names") or ())
+    pred_axes = []
+    pred_t = np.asarray([], dtype=np.float64)
+    pred = np.asarray([], dtype=np.float64)
     if len(pred_df):
-        t_pred = pred_df["end_time_sec"].to_numpy(dtype=float)
+        pred_t = pred_df["end_time_sec"].to_numpy(dtype=float)
         pred = pred_df["pred_label"].to_numpy(dtype=float)
-        ax.step(t_pred, pred, where="post", linewidth=1.8, label="predicted label")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Amplitude / label")
-    ax.set_title(f"Predictions: {Path(labeled_npz).name}")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+
+    for idx, ax in enumerate(axes_flat):
+        name = str(channel_names[idx]) if idx < len(channel_names) else f"Ch {idx + 1}"
+        ax.plot(t, eeg[:n, idx], linewidth=0.7, color="tab:blue", label=name)
+        ax.set_ylabel(name)
+        ax.grid(True, alpha=0.3)
+
+        pred_ax = ax.twinx()
+        pred_axes.append(pred_ax)
+        if len(pred_t):
+            pred_ax.step(
+                pred_t,
+                pred,
+                where="post",
+                linewidth=1.4,
+                color="tab:red",
+                alpha=0.85,
+                label="prediction",
+            )
+        if class_names:
+            pred_ax.set_yticks(np.arange(len(class_names)))
+            pred_ax.set_yticklabels([str(name) for name in class_names])
+            pred_ax.set_ylim(-0.5, max(0.5, len(class_names) - 0.5))
+        elif len(pred):
+            pred_ax.set_ylim(float(np.min(pred)) - 0.5, float(np.max(pred)) + 0.5)
+        pred_ax.tick_params(axis="y", colors="tab:red")
+
+    axes_flat[-1].set_xlabel("Time (s)")
+    axes_flat[0].set_title(f"Realtime predictions over EEG channels: {Path(labeled_npz).name}")
+    axes_flat[0].legend(loc="upper left")
+    if pred_axes:
+        pred_axes[0].legend(loc="upper right")
     plt.tight_layout()
-    return fig, ax
+    return fig, axes_flat
