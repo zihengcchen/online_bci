@@ -41,7 +41,7 @@ class AcquisitionConfig:
     """BIOPAC MP150 collection settings."""
 
     samplerate: int = 200
-    channels: Tuple[int, ...] = (1, 2, 3, 4, 5)
+    channels: Tuple[int, ...] = (1, 2, 3, 4, 16)
     chunk_sec: float = 0.10
 
 
@@ -78,7 +78,7 @@ class PreprocessConfig:
     """Signal preprocessing and channel layout."""
 
     eeg_channels: Tuple[int, ...] = (1, 2, 3, 4)
-    audio_channel: int = 5
+    audio_channel: int = 16
     bandpass_low_hz: Optional[float] = 1.0
     bandpass_high_hz: Optional[float] = 40.0
     notch_hz: Optional[Tuple[float, ...]] = (60.0,)
@@ -795,6 +795,15 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
     eeg = _as_2d_samples_channels(labeled["eeg"])
     labels = np.asarray(labeled["sample_labels"], dtype=np.int64).reshape(-1)
     n = min(eeg.shape[0], len(labels))
+    fs = int(np.asarray(labeled["samplerate"]).item())
+    cue_onset_samples = (
+        np.asarray(labeled["cue_onset_samples"], dtype=np.int64).reshape(-1)
+        if "cue_onset_samples" in labeled.files
+        else np.empty(0, dtype=np.int64)
+    )
+    cue_onset_samples = cue_onset_samples[
+        (cue_onset_samples >= 0) & (cue_onset_samples < n)
+    ]
     class_names = tuple(str(x) for x in labeled["class_names"]) if "class_names" in labeled.files else tuple()
     return {
         "eeg": eeg[:n].astype(np.float32),
@@ -804,13 +813,15 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
             else None
         ),
         "sample_labels": labels[:n].astype(np.int64),
-        "samplerate": int(np.asarray(labeled["samplerate"]).item()),
+        "samplerate": fs,
         "class_names": class_names,
         "path": str(path),
         "segment_name": str(np.asarray(labeled["segment_name"]).item()) if "segment_name" in labeled.files else Path(path).stem,
         "audio": np.asarray(labeled["audio"], dtype=np.float32).reshape(-1)[:n] if "audio" in labeled.files else None,
         "audio_envelope": np.asarray(labeled["audio_envelope"], dtype=np.float64).reshape(-1)[:n] if "audio_envelope" in labeled.files else None,
         "audio_threshold": float(np.asarray(labeled["audio_threshold"]).item()) if "audio_threshold" in labeled.files else None,
+        "cue_onset_samples": cue_onset_samples,
+        "cue_onset_times_sec": cue_onset_samples.astype(np.float64) / float(fs),
         "acquired_channels": (
             tuple(int(x) for x in np.asarray(labeled["acquired_channels"]).reshape(-1))
             if "acquired_channels" in labeled.files
@@ -823,6 +834,15 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         ),
         "audio_channel": int(np.asarray(labeled["audio_channel"]).item()) if "audio_channel" in labeled.files else None,
     }
+
+
+def _cue_onset_times_for_plot(rec: Dict[str, Any], max_duration_sec: Optional[float]) -> np.ndarray:
+    fs = int(rec["samplerate"])
+    samples = np.asarray(rec.get("cue_onset_samples", []), dtype=np.int64).reshape(-1)
+    cue_times = samples.astype(np.float64) / float(fs)
+    if max_duration_sec is not None:
+        cue_times = cue_times[cue_times <= float(max_duration_sec)]
+    return cue_times
 
 
 # ---------------------------------------------------------------------------
@@ -1291,6 +1311,110 @@ def train_validate_pipeline(
     result = train_lstm(bundle, training_config, output_dir)
     result["dataset_bundle"] = bundle
     return result
+
+
+def slugify_config_value(value: Any) -> str:
+    text = str(value).strip().lower()
+    replacements = {
+        " ": "_",
+        ".": "p",
+        "-": "m",
+        "(": "",
+        ")": "",
+        "[": "",
+        "]": "",
+        ",": "_",
+        ":": "_",
+        "/": "_",
+        "\\": "_",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_") or "value"
+
+
+def offline_train_test_sweep(
+    train_labeled_npz: PathLike,
+    test_labeled_npz: PathLike,
+    output_dir: PathLike,
+    feature_modes: Sequence[str] = ("raw_signal", "fft_bandpower"),
+    window_secs: Sequence[float] = (1.0, 1.5, 2.0),
+    stride_secs: Sequence[float] = (0.2,),
+    bandpower_hz_values: Sequence[Tuple[float, float]] = ((8.0, 35.0),),
+    training_config: Optional[TrainingConfig] = None,
+) -> Dict[str, Any]:
+    """Train offline model variants and test each on a labeled realtime trial."""
+
+    output_dir = ensure_dir(output_dir)
+    training_config = training_config or TrainingConfig()
+    rows: List[Dict[str, Any]] = []
+    result_dirs: List[Path] = []
+
+    for feature_mode in feature_modes:
+        bands = bandpower_hz_values if str(feature_mode) == "fft_bandpower" else ((0.0, 0.0),)
+        for window_sec in window_secs:
+            for stride_sec in stride_secs:
+                for bandpower_hz in bands:
+                    win_cfg = WindowConfig(
+                        feature_mode=str(feature_mode),
+                        window_sec=float(window_sec),
+                        stride_sec=float(stride_sec),
+                        label_mode="endpoint",
+                        bandpower_hz=tuple(float(x) for x in bandpower_hz),
+                    )
+                    parts = [
+                        str(feature_mode),
+                        f"win_{slugify_config_value(window_sec)}s",
+                        f"stride_{slugify_config_value(stride_sec)}s",
+                    ]
+                    if str(feature_mode) == "fft_bandpower":
+                        parts.append(f"band_{slugify_config_value(win_cfg.bandpower_hz[0])}_{slugify_config_value(win_cfg.bandpower_hz[1])}hz")
+                    variant_name = "__".join(parts)
+                    variant_dir = ensure_dir(output_dir / variant_name)
+
+                    train_result = train_validate_pipeline(
+                        labeled_npz_paths=[train_labeled_npz],
+                        output_dir=variant_dir,
+                        window_config=win_cfg,
+                        training_config=training_config,
+                    )
+                    test_result = predict_labeled_recording(
+                        labeled_npz=test_labeled_npz,
+                        checkpoint_path=train_result["checkpoint_path"],
+                        output_dir=variant_dir,
+                        batch_size=training_config.batch_size,
+                    )
+
+                    val_summary = train_result["validation_summary"].iloc[0].to_dict()
+                    test_summary = test_result["summary"].iloc[0].to_dict()
+                    row = {
+                        "variant": variant_name,
+                        "feature_mode": win_cfg.feature_mode,
+                        "window_sec": win_cfg.window_sec,
+                        "stride_sec": win_cfg.stride_sec,
+                        "bandpower_low_hz": win_cfg.bandpower_hz[0] if win_cfg.feature_mode == "fft_bandpower" else np.nan,
+                        "bandpower_high_hz": win_cfg.bandpower_hz[1] if win_cfg.feature_mode == "fft_bandpower" else np.nan,
+                        "checkpoint_path": str(train_result["checkpoint_path"]),
+                        "variant_dir": str(variant_dir),
+                        "val_accuracy": val_summary.get("accuracy", np.nan),
+                        "val_balanced_accuracy": val_summary.get("balanced_accuracy", np.nan),
+                        "test_accuracy": test_summary.get("accuracy", np.nan),
+                        "test_balanced_accuracy": test_summary.get("balanced_accuracy", np.nan),
+                        "test_n_windows": test_summary.get("n_windows", np.nan),
+                    }
+                    rows.append(row)
+                    result_dirs.append(variant_dir)
+
+    summary_df = pd.DataFrame(rows)
+    summary_csv = output_dir / "offline_sweep_summary.csv"
+    summary_df.to_csv(summary_csv, index=False)
+    return {
+        "summary": summary_df,
+        "summary_csv": summary_csv,
+        "result_dirs": result_dirs,
+    }
 
 
 def load_checkpoint(checkpoint_path: PathLike, device: Optional[Union[str, torch.device]] = None) -> Tuple[nn.Module, Dict[str, Any], torch.device]:
@@ -2123,6 +2247,7 @@ def plot_labeled_recording(labeled_npz: PathLike, max_duration_sec: Optional[flo
     if max_duration_sec is not None:
         n = min(n, int(round(float(max_duration_sec) * fs)))
     t = np.arange(n) / float(fs)
+    cue_times = _cue_onset_times_for_plot(rec, max_duration_sec)
 
     channel_traces: List[Tuple[int, str, np.ndarray]] = []
     for idx in range(eeg.shape[1]):
@@ -2148,6 +2273,8 @@ def plot_labeled_recording(labeled_npz: PathLike, max_duration_sec: Optional[flo
     axes_flat = axes.reshape(-1)
     for ax, (_, label, trace) in zip(axes_flat, channel_traces):
         ax.plot(t, trace, linewidth=0.7)
+        for cue_time in cue_times:
+            ax.axvline(cue_time, linestyle=":", color="black", alpha=0.65, linewidth=1.0)
         ax.set_ylabel(label)
         ax.grid(True, alpha=0.3)
     axes_flat[-1].set_xlabel("Time (s)")
@@ -2193,10 +2320,20 @@ def plot_predictions_overlay(
     if len(pred_df):
         pred_t = pred_df["end_time_sec"].to_numpy(dtype=float)
         pred = pred_df["pred_label"].to_numpy(dtype=float)
+    cue_times = _cue_onset_times_for_plot(rec, max_duration_sec)
 
     for idx, ax in enumerate(axes_flat):
         name = str(channel_names[idx]) if idx < len(channel_names) else f"Ch {idx + 1}"
         ax.plot(t, eeg[:n, idx], linewidth=0.7, color="tab:blue", label=name)
+        for cue_idx, cue_time in enumerate(cue_times):
+            ax.axvline(
+                cue_time,
+                linestyle=":",
+                color="black",
+                alpha=0.65,
+                linewidth=1.0,
+                label="cue onset" if idx == 0 and cue_idx == 0 else None,
+            )
         ax.set_ylabel(name)
         ax.grid(True, alpha=0.3)
 
