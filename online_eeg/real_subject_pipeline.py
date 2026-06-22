@@ -2849,6 +2849,7 @@ def plot_predictions_overlay(
     max_duration_sec: Optional[float] = None,
     channel_names: Sequence[str] = ("O1", "Oz", "O2", "POz"),
     use_raw_eeg: bool = False,
+    show_true_labels: bool = False,
 ):
     import matplotlib.pyplot as plt
 
@@ -2884,16 +2885,17 @@ def plot_predictions_overlay(
     cue_times = _cue_onset_times_for_plot(rec, max_duration_sec)
 
     cue_color = "tab:red"
-    prediction_color = "tab:purple"
+    prediction_color = "tab:orange"
+    true_label_color = "tab:blue"
     legend_handles: List[Any] = []
     legend_labels: List[str] = []
 
     for idx, ax in enumerate(axes_flat):
         name = str(channel_names[idx]) if idx < len(channel_names) else f"Ch {idx + 1}"
-        eeg_line, = ax.plot(t, eeg[:n, idx], linewidth=0.7, color="tab:blue", label=name)
+        eeg_line, = ax.plot(t, eeg[:n, idx], linewidth=0.7, color="black", label="EEG")
         if idx == 0:
             legend_handles.append(eeg_line)
-            legend_labels.append(name)
+            legend_labels.append("EEG")
 
         for cue_idx, cue_time in enumerate(cue_times):
             cue_line = ax.axvline(
@@ -2913,6 +2915,21 @@ def plot_predictions_overlay(
 
         pred_ax = ax.twinx()
         pred_axes.append(pred_ax)
+        if show_true_labels and len(labels):
+            true_line, = pred_ax.step(
+                t,
+                labels[:n].astype(float),
+                where="post",
+                linewidth=1.4,
+                linestyle="--",
+                color=true_label_color,
+                alpha=0.8,
+                label="true label",
+                zorder=2,
+            )
+            if idx == 0:
+                legend_handles.append(true_line)
+                legend_labels.append("true label")
         if len(pred_t):
             pred_line, = pred_ax.step(
                 pred_t,
