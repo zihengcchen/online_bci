@@ -2232,7 +2232,11 @@ def summarize_transition_delay(delay_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def plot_labeled_recording(labeled_npz: PathLike, max_duration_sec: Optional[float] = 30.0):
+def plot_labeled_recording(
+    labeled_npz: PathLike,
+    max_duration_sec: Optional[float] = 30.0,
+    channel_names: Optional[Sequence[str]] = None,
+):
     import matplotlib.pyplot as plt
 
     rec = load_labeled_recording(labeled_npz)
@@ -2252,7 +2256,12 @@ def plot_labeled_recording(labeled_npz: PathLike, max_duration_sec: Optional[flo
     channel_traces: List[Tuple[int, str, np.ndarray]] = []
     for idx in range(eeg.shape[1]):
         hardware_channel = int(eeg_channels[idx]) if idx < len(eeg_channels) else idx + 1
-        channel_traces.append((hardware_channel, f"EEG channel {hardware_channel}", eeg[:n, idx]))
+        channel_label = (
+            str(channel_names[idx])
+            if channel_names is not None and idx < len(channel_names)
+            else f"EEG channel {hardware_channel}"
+        )
+        channel_traces.append((hardware_channel, channel_label, eeg[:n, idx]))
     if audio is not None:
         hardware_channel = int(audio_channel) if audio_channel is not None else len(channel_traces) + 1
         channel_traces.append((hardware_channel, f"Audio channel {hardware_channel}", np.asarray(audio)[:n]))
