@@ -79,6 +79,7 @@ class PreprocessConfig:
 
     eeg_channels: Tuple[int, ...] = (1, 2, 3, 4)
     audio_channel: int = 16
+    apply_software_filters: bool = True
     bandpass_low_hz: Optional[float] = 1.0
     bandpass_high_hz: Optional[float] = 40.0
     notch_hz: Optional[Tuple[float, ...]] = (60.0,)
@@ -91,7 +92,7 @@ class PreprocessConfig:
 class WindowConfig:
     """Sliding-window and feature extraction settings."""
 
-    feature_mode: str = "raw_signal"  # "raw_signal" or "fft_bandpower"
+    feature_mode: str = "filtered_signal"  # filtered_signal = non-FFT filtered windows; fft_bandpower = FFT features
     window_sec: float = 1.0
     stride_sec: float = 0.10
     label_mode: str = "endpoint"  # "endpoint" or "majority"
@@ -698,6 +699,8 @@ def preprocess_eeg_signal(
     eeg = _as_2d_samples_channels(eeg_raw).astype(np.float32)
     if preprocess_config.demean_channels:
         eeg = eeg - np.nanmean(eeg, axis=0, keepdims=True)
+    if not bool(getattr(preprocess_config, "apply_software_filters", True)):
+        return eeg.astype(np.float32)
     eeg = notch_filter(
         eeg,
         fs=fs,
@@ -836,6 +839,64 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
     }
 
 
+def labeled_preprocess_summary(
+    labeled_npz_paths: Union[PathLike, Sequence[PathLike], Dict[str, PathLike]],
+) -> pd.DataFrame:
+    """Summarize preprocessing metadata saved inside labeled NPZ files."""
+
+    if isinstance(labeled_npz_paths, dict):
+        items = [(str(name), Path(path)) for name, path in labeled_npz_paths.items()]
+    elif isinstance(labeled_npz_paths, (str, os.PathLike)):
+        path = Path(labeled_npz_paths)
+        items = [(path.stem, path)]
+    else:
+        items = [(Path(path).stem, Path(path)) for path in labeled_npz_paths]
+
+    rows: List[Dict[str, Any]] = []
+    for name, path in items:
+        labeled = np.load(path, allow_pickle=True)
+        try:
+            files = set(labeled.files)
+            preprocess_config: Dict[str, Any] = {}
+            if "preprocess_config_json" in files:
+                raw_json = str(np.asarray(labeled["preprocess_config_json"]).item())
+                preprocess_config = json.loads(raw_json) if raw_json else {}
+
+            fs = int(np.asarray(labeled["samplerate"]).item()) if "samplerate" in files else np.nan
+            n_samples = int(labeled["eeg"].shape[0]) if "eeg" in files else np.nan
+            duration_sec = float(n_samples) / float(fs) if np.isfinite(fs) and fs else np.nan
+            has_apply_flag = "apply_software_filters" in preprocess_config
+            apply_software_filters = preprocess_config.get(
+                "apply_software_filters",
+                True if preprocess_config else np.nan,
+            )
+            rows.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "samplerate": fs,
+                    "duration_sec": duration_sec,
+                    "has_preprocess_config": bool(preprocess_config),
+                    "has_apply_software_filters_flag": bool(has_apply_flag),
+                    "apply_software_filters": apply_software_filters,
+                    "demean_channels": preprocess_config.get("demean_channels", np.nan),
+                    "bandpass_low_hz": preprocess_config.get("bandpass_low_hz", np.nan),
+                    "bandpass_high_hz": preprocess_config.get("bandpass_high_hz", np.nan),
+                    "notch_hz": preprocess_config.get("notch_hz", np.nan),
+                    "eeg_channels": preprocess_config.get("eeg_channels", np.nan),
+                    "audio_channel": preprocess_config.get("audio_channel", np.nan),
+                    "source_raw_npz": (
+                        str(np.asarray(labeled["source_raw_npz"]).item())
+                        if "source_raw_npz" in files
+                        else ""
+                    ),
+                }
+            )
+        finally:
+            labeled.close()
+
+    return pd.DataFrame(rows)
+
 def _cue_onset_times_for_plot(rec: Dict[str, Any], max_duration_sec: Optional[float]) -> np.ndarray:
     fs = int(rec["samplerate"])
     samples = np.asarray(rec.get("cue_onset_samples", []), dtype=np.int64).reshape(-1)
@@ -882,14 +943,35 @@ def fft_log_bandpower(window: np.ndarray, fs: int, band: Tuple[float, float], ep
     return np.log10(np.sum(power[mask, :], axis=0) + eps).astype(np.float32)
 
 
-def extract_window_features(window: np.ndarray, fs: int, config: WindowConfig) -> np.ndarray:
-    mode = str(config.feature_mode).lower()
+def canonical_feature_mode(feature_mode: str) -> str:
+    """Return the canonical feature-mode name.
+
+    ``raw_signal`` is accepted only as a backward-compatible alias for older
+    checkpoints and sweep outputs. The data are preprocessed before windowing.
+    """
+
+    mode = str(feature_mode).lower()
     if mode == "raw_signal":
+        return "filtered_signal"
+    if mode in {"filtered_signal", "fft_bandpower"}:
+        return mode
+    raise ValueError("feature_mode must be 'filtered_signal' or 'fft_bandpower'.")
+
+
+def extract_window_features(window: np.ndarray, fs: int, config: WindowConfig) -> np.ndarray:
+    """Extract features from an already preprocessed EEG window.
+
+    ``filtered_signal`` keeps the filtered time-domain samples and skips FFT
+    feature extraction.
+    """
+
+    mode = canonical_feature_mode(config.feature_mode)
+    if mode == "filtered_signal":
         return _as_2d_samples_channels(window).astype(np.float32)
     if mode == "fft_bandpower":
         bp = fft_log_bandpower(window, fs=fs, band=config.bandpower_hz)
         return bp[None, :].astype(np.float32)
-    raise ValueError("feature_mode must be 'raw_signal' or 'fft_bandpower'.")
+    raise ValueError("feature_mode must be 'filtered_signal' or 'fft_bandpower'.")
 
 
 def make_labeled_windows(
@@ -933,7 +1015,6 @@ def make_labeled_windows(
         )
 
     return np.asarray(X, dtype=np.float32), np.asarray(y, dtype=np.int64), pd.DataFrame(rows)
-
 
 def fit_normalizer(X_train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     mean = X_train.mean(axis=(0, 1), keepdims=True)
@@ -1339,37 +1420,43 @@ def offline_train_test_sweep(
     train_labeled_npz: PathLike,
     test_labeled_npz: PathLike,
     output_dir: PathLike,
-    feature_modes: Sequence[str] = ("raw_signal", "fft_bandpower"),
+    feature_modes: Sequence[str] = ("filtered_signal", "fft_bandpower"),
     window_secs: Sequence[float] = (1.0, 1.5, 2.0),
     stride_secs: Sequence[float] = (0.2,),
     bandpower_hz_values: Sequence[Tuple[float, float]] = ((8.0, 35.0),),
     training_config: Optional[TrainingConfig] = None,
+    label_mode: str = "endpoint",
 ) -> Dict[str, Any]:
     """Train offline model variants and test each on a labeled realtime trial."""
 
     output_dir = ensure_dir(output_dir)
     training_config = training_config or TrainingConfig()
+    label_mode = str(label_mode).lower()
+    if label_mode not in {"endpoint", "majority"}:
+        raise ValueError("label_mode must be 'endpoint' or 'majority'.")
     rows: List[Dict[str, Any]] = []
     result_dirs: List[Path] = []
 
     for feature_mode in feature_modes:
-        bands = bandpower_hz_values if str(feature_mode) == "fft_bandpower" else ((0.0, 0.0),)
+        feature_mode = canonical_feature_mode(str(feature_mode))
+        bands = bandpower_hz_values if feature_mode == "fft_bandpower" else ((0.0, 0.0),)
         for window_sec in window_secs:
             for stride_sec in stride_secs:
                 for bandpower_hz in bands:
                     win_cfg = WindowConfig(
-                        feature_mode=str(feature_mode),
+                        feature_mode=feature_mode,
                         window_sec=float(window_sec),
                         stride_sec=float(stride_sec),
-                        label_mode="endpoint",
+                        label_mode=label_mode,
                         bandpower_hz=tuple(float(x) for x in bandpower_hz),
                     )
                     parts = [
-                        str(feature_mode),
+                        feature_mode,
                         f"win_{slugify_config_value(window_sec)}s",
                         f"stride_{slugify_config_value(stride_sec)}s",
+                        f"labels_{slugify_config_value(label_mode)}",
                     ]
-                    if str(feature_mode) == "fft_bandpower":
+                    if feature_mode == "fft_bandpower":
                         parts.append(f"band_{slugify_config_value(win_cfg.bandpower_hz[0])}_{slugify_config_value(win_cfg.bandpower_hz[1])}hz")
                     variant_name = "__".join(parts)
                     variant_dir = ensure_dir(output_dir / variant_name)
@@ -1417,19 +1504,25 @@ def offline_train_test_sweep(
     }
 
 
-def load_checkpoint(checkpoint_path: PathLike, device: Optional[Union[str, torch.device]] = None) -> Tuple[nn.Module, Dict[str, Any], torch.device]:
+
+def load_checkpoint(
+    checkpoint_path: PathLike,
+    device: Optional[str] = None,
+) -> Tuple[LSTMClassifier, Dict[str, Any], torch.device]:
+    """Load a saved LSTM checkpoint and return the model, metadata, and device."""
+
     checkpoint_path = Path(checkpoint_path)
     device_obj = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device_obj, weights_only=False)
     except TypeError:
         checkpoint = torch.load(checkpoint_path, map_location=device_obj)
+
     model = LSTMClassifier(**checkpoint["model_config"])
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device_obj)
     model.eval()
     return model, checkpoint, device_obj
-
 
 def class_names_from_checkpoint(
     checkpoint: Dict[str, Any],
@@ -1457,18 +1550,18 @@ def class_names_from_checkpoint(
         names = names + tuple(f"class_{i}" for i in range(len(names), num_classes))
     return names
 
-
 def window_config_from_checkpoint(checkpoint: Dict[str, Any]) -> WindowConfig:
     """Return window settings from new or original signal_generator checkpoints."""
 
     if "window_config" in checkpoint:
         cfg = dict(checkpoint["window_config"])
+        cfg["feature_mode"] = canonical_feature_mode(cfg.get("feature_mode", "filtered_signal"))
         cfg["bandpower_hz"] = tuple(cfg.get("bandpower_hz", (18.0, 22.0)))
         return WindowConfig(**cfg)
 
     saved_cfg = dict(checkpoint.get("config", {}))
     fs = int(checkpoint.get("fs", saved_cfg.get("fs", 200)))
-    feature_mode = checkpoint.get("feature_mode", saved_cfg.get("feature_mode", "raw_signal"))
+    feature_mode = canonical_feature_mode(checkpoint.get("feature_mode", saved_cfg.get("feature_mode", "filtered_signal")))
     bandpower_hz = tuple(checkpoint.get("bandpower_hz", saved_cfg.get("bandpower_hz", (18.0, 22.0))))
 
     if "window_sec" in saved_cfg:
@@ -1618,10 +1711,13 @@ def evaluate_prediction_log_against_labeled_recording(
         if checkpoint_path is not None:
             _, checkpoint, _ = load_checkpoint(checkpoint_path)
             class_names = class_names_from_checkpoint(checkpoint, fallback=rec["class_names"])
-            default_window_samples = int(round(window_config_from_checkpoint(checkpoint).window_sec * fs))
+            win_cfg = window_config_from_checkpoint(checkpoint)
+            default_window_samples = int(round(win_cfg.window_sec * fs))
+            label_mode = win_cfg.label_mode
         else:
             class_names = tuple(rec["class_names"])
             default_window_samples = int(round(1.0 * fs))
+            label_mode = "endpoint"
 
         true_values = []
         valid_rows = []
@@ -1638,7 +1734,7 @@ def evaluate_prediction_log_against_labeled_recording(
                 true_values.append(np.nan)
                 valid_rows.append(False)
             else:
-                true_values.append(int(window[-1]))
+                true_values.append(window_label(window, mode=label_mode))
                 valid_rows.append(True)
 
         pred_df = pred_df.copy()
@@ -1688,7 +1784,6 @@ def evaluate_prediction_log_against_labeled_recording(
         "delay_csv": delay_csv,
         "delay_summary_csv": delay_summary_csv,
     }
-
 
 def _setup_realtime_plot(
     acquired_channels: Sequence[int],
@@ -2236,11 +2331,12 @@ def plot_labeled_recording(
     labeled_npz: PathLike,
     max_duration_sec: Optional[float] = 30.0,
     channel_names: Optional[Sequence[str]] = None,
+    use_raw_eeg: bool = False,
 ):
     import matplotlib.pyplot as plt
 
     rec = load_labeled_recording(labeled_npz)
-    eeg = rec["eeg_raw"] if rec.get("eeg_raw") is not None else rec["eeg"]
+    eeg = rec["eeg_raw"] if use_raw_eeg and rec.get("eeg_raw") is not None else rec["eeg"]
     audio = rec.get("audio")
     acquired_channels = tuple(rec.get("acquired_channels") or ())
     eeg_channels = tuple(rec.get("eeg_channels") or range(1, eeg.shape[1] + 1))
@@ -2297,12 +2393,13 @@ def plot_predictions_overlay(
     predictions: Union[pd.DataFrame, PathLike],
     max_duration_sec: Optional[float] = None,
     channel_names: Sequence[str] = ("O1", "Oz", "O2", "POz"),
+    use_raw_eeg: bool = False,
 ):
     import matplotlib.pyplot as plt
 
     rec = load_labeled_recording(labeled_npz)
     pred_df = pd.read_csv(predictions) if not isinstance(predictions, pd.DataFrame) else predictions.copy()
-    eeg = rec["eeg_raw"] if rec.get("eeg_raw") is not None else rec["eeg"]
+    eeg = rec["eeg_raw"] if use_raw_eeg and rec.get("eeg_raw") is not None else rec["eeg"]
     labels = rec["sample_labels"]
     fs = int(rec["samplerate"])
 
