@@ -112,6 +112,21 @@ def drop_single_value_columns(df: pd.DataFrame, columns: Sequence[str]) -> pd.Da
             out = out.drop(columns=[column])
     return out
 
+def probability_column_map(
+    probabilities: np.ndarray,
+    class_names: Sequence[str],
+) -> Dict[str, np.ndarray]:
+    """Return one named probability vector per classifier output."""
+
+    prob = np.asarray(probabilities)
+    columns: Dict[str, np.ndarray] = {}
+    if prob.ndim != 2:
+        raise ValueError(f"Expected probabilities with shape (rows, classes), got {prob.shape}.")
+    for label_idx in range(prob.shape[1]):
+        name = class_names[label_idx] if label_idx < len(class_names) else f"class_{label_idx}"
+        columns[f"prob_{name}"] = prob[:, label_idx]
+    return columns
+
 def add_probability_columns(
     df: pd.DataFrame,
     probabilities: np.ndarray,
@@ -119,9 +134,8 @@ def add_probability_columns(
 ) -> pd.DataFrame:
     """Append one probability column per classifier output to ``df`` in place."""
 
-    for label_idx in range(probabilities.shape[1]):
-        name = class_names[label_idx] if label_idx < len(class_names) else f"class_{label_idx}"
-        df[f"prob_{name}"] = probabilities[:, label_idx]
+    for column, values in probability_column_map(probabilities, class_names).items():
+        df[column] = values
     return df
 
 
@@ -132,5 +146,6 @@ __all__ = [
     "channel_index",
     "extract_hardware_channels",
     "drop_single_value_columns",
+    "probability_column_map",
     "add_probability_columns",
 ]

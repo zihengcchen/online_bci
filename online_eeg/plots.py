@@ -83,6 +83,7 @@ def plot_predictions_overlay(
     channel_names: Sequence[str] = ("O1", "Oz", "O2", "POz"),
     use_raw_eeg: bool = False,
     show_true_labels: bool = False,
+    legend_loc: str = "upper left",
 ):
     import matplotlib.pyplot as plt
 
@@ -187,12 +188,50 @@ def plot_predictions_overlay(
     axes_flat[-1].set_xlabel("Time (s)")
     axes_flat[0].set_title(f"Realtime predictions over EEG channels: {Path(labeled_npz).name}")
     if legend_handles:
-        axes_flat[0].legend(legend_handles, legend_labels, loc="upper left")
+        axes_flat[0].legend(legend_handles, legend_labels, loc=legend_loc)
     plt.tight_layout()
     return fig, axes_flat
+
+def plot_xcov_curve(
+    xcov_curve: pd.DataFrame,
+    xcov_delay_summary: pd.DataFrame,
+    title: str,
+    figsize: Tuple[float, float] = (12, 5),
+    legend_loc: str = "center right",
+):
+    """Plot an xcov curve and mark the peak lag used as the delay estimate."""
+
+    import matplotlib.pyplot as plt
+
+    if xcov_curve is None or xcov_delay_summary is None:
+        raise ValueError("xcov_curve and xcov_delay_summary are required.")
+    if len(xcov_curve) == 0 or len(xcov_delay_summary) == 0:
+        raise ValueError("xcov_curve and xcov_delay_summary cannot be empty.")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(xcov_curve["lag_sec"], xcov_curve["xcov_coeff"], linewidth=1.8)
+    peak_delay = float(xcov_delay_summary.loc[0, "xcov_delay_sec"])
+    peak_coeff = float(xcov_delay_summary.loc[0, "xcov_peak_coeff"])
+    ax.axvline(
+        peak_delay,
+        linestyle=":",
+        color="tab:red",
+        linewidth=2.0,
+        label=f"peak lag = {peak_delay:.3f} s",
+    )
+    ax.scatter([peak_delay], [peak_coeff], color="tab:red", zorder=3)
+    ax.axvline(0.0, linestyle="--", color="black", alpha=0.5, linewidth=1.0)
+    ax.set_xlabel("Lag (s)", fontsize=14)
+    ax.set_ylabel("Normalized xcov coefficient", fontsize=14)
+    ax.set_title(title, fontsize=16)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=12, loc=legend_loc)
+    plt.tight_layout()
+    return fig, ax
 
 
 __all__ = [
     "plot_labeled_recording",
     "plot_predictions_overlay",
+    "plot_xcov_curve",
 ]

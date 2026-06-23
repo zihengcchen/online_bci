@@ -21,7 +21,7 @@ try:
         window_config_from_checkpoint,
     )
     from .preprocessing import preprocess_eeg_signal
-    from .utils import _as_2d_samples_channels, _checked_acquisition_chunk, _duration_to_sample_count, _now_string, ensure_dir, extract_hardware_channels
+    from .utils import _as_2d_samples_channels, _checked_acquisition_chunk, _duration_to_sample_count, _now_string, ensure_dir, extract_hardware_channels, probability_column_map
     from .windowing import apply_normalizer, extract_window_features, make_prediction_aligned_eeg_table
 except ImportError:
     from acquisition import _import_mp150_class
@@ -33,16 +33,10 @@ except ImportError:
         window_config_from_checkpoint,
     )
     from preprocessing import preprocess_eeg_signal
-    from utils import _as_2d_samples_channels, _checked_acquisition_chunk, _duration_to_sample_count, _now_string, ensure_dir, extract_hardware_channels
+    from utils import _as_2d_samples_channels, _checked_acquisition_chunk, _duration_to_sample_count, _now_string, ensure_dir, extract_hardware_channels, probability_column_map
     from windowing import apply_normalizer, extract_window_features, make_prediction_aligned_eeg_table
 
 
-def _prediction_probability_columns(prob: np.ndarray, class_names: Sequence[str]) -> Dict[str, np.ndarray]:
-    columns: Dict[str, np.ndarray] = {}
-    for label_idx in range(prob.shape[1]):
-        name = class_names[label_idx] if label_idx < len(class_names) else f"class_{label_idx}"
-        columns[f"prob_{name}"] = prob[:, label_idx]
-    return columns
 
 def _format_realtime_prediction_status(row: Dict[str, Any], class_names: Sequence[str]) -> str:
     pred_label = int(row["pred_label"])
@@ -359,7 +353,7 @@ def run_realtime_mp150_prediction(
                         "end_time_sec": float(next_prediction_end) / float(fs),
                         "pred_label": int(pred[0]),
                     }
-                    for key, value in _prediction_probability_columns(prob, class_names).items():
+                    for key, value in probability_column_map(prob, class_names).items():
                         row[key] = float(value[0])
                     writer.writerow(row)
                     predictions_since_flush += 1

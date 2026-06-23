@@ -120,6 +120,61 @@ def _write_analysis_csvs(tables: Dict[str, pd.DataFrame], paths: Dict[str, Path]
     ):
         tables[table_key].to_csv(paths[path_key], index=False)
 
+def _optional_path(value: Any, fallback: Path) -> Path:
+    if value is None:
+        return fallback
+    try:
+        if bool(pd.isna(value)):
+            return fallback
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return Path(text) if text else fallback
+
+def test_variant_artifact_paths(
+    variant_row: Any,
+    labeled_npz: PathLike,
+) -> Dict[str, Path]:
+    """Return standard test artifact paths for one offline sweep variant row."""
+
+    row = variant_row.to_dict() if hasattr(variant_row, "to_dict") else dict(variant_row)
+    variant_dir = Path(row["variant_dir"])
+    stem = Path(labeled_npz).stem
+    aligned_fallback = variant_dir / f"{stem}_test_predictions_aligned_eeg.csv"
+    return {
+        "variant_dir": variant_dir,
+        "prediction_csv": variant_dir / f"{stem}_test_predictions.csv",
+        "aligned_prediction_csv": _optional_path(row.get("test_aligned_prediction_csv"), aligned_fallback),
+        "cue_delay_summary_csv": variant_dir / f"{stem}_test_cue_delay_summary.csv",
+        "xcov_delay_summary_csv": variant_dir / f"{stem}_test_xcov_delay_summary.csv",
+        "xcov_curve_csv": variant_dir / f"{stem}_test_xcov_curve.csv",
+    }
+
+def load_test_variant_artifacts(
+    variant_row: Any,
+    labeled_npz: PathLike,
+) -> Dict[str, Any]:
+    """Load the prediction tables used to inspect one offline sweep variant."""
+
+    row = variant_row.to_dict() if hasattr(variant_row, "to_dict") else dict(variant_row)
+    paths = test_variant_artifact_paths(row, labeled_npz)
+    prediction_csv = paths["prediction_csv"]
+    if not prediction_csv.exists():
+        raise FileNotFoundError(f"Prediction CSV not found: {prediction_csv}")
+
+    def _read_optional_csv(path: Path) -> Optional[pd.DataFrame]:
+        return pd.read_csv(path) if path.exists() else None
+
+    return {
+        "variant": row.get("variant", ""),
+        "row": row,
+        "paths": paths,
+        "predictions": pd.read_csv(prediction_csv),
+        "cue_delay_summary": _read_optional_csv(paths["cue_delay_summary_csv"]),
+        "xcov_delay_summary": _read_optional_csv(paths["xcov_delay_summary_csv"]),
+        "xcov_curve": _read_optional_csv(paths["xcov_curve_csv"]),
+    }
+
 
 def predict_labeled_recording(
     labeled_npz: PathLike,
@@ -345,10 +400,12 @@ def collect_preprocess_and_test_trial(
 __all__ = [
     "collect_preprocess_and_test_trial",
     "evaluate_prediction_log_against_labeled_recording",
+    "load_test_variant_artifacts",
     "estimate_transition_delay",
     "make_prediction_aligned_eeg_table",
     "make_prediction_aligned_eeg_tables_for_labeled_sources",
     "posthoc_analyze_realtime_trial",
+    "test_variant_artifact_paths",
     "predict_labeled_recording",
     "run_realtime_mp150_prediction",
     "summarize_transition_delay",

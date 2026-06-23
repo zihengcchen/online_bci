@@ -247,6 +247,82 @@ def slugify_config_value(value: Any) -> str:
         text = text.replace("__", "_")
     return text.strip("_") or "value"
 
+def _coerce_numeric_columns(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    out = df.copy()
+    for column in columns:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    return out
+
+def rank_sweep_summary(
+    summary: pd.DataFrame,
+    rank_column: str = "test_xcov_peak_coeff",
+) -> pd.DataFrame:
+    """Rank sweep rows by a primary metric, then test/validation accuracy."""
+
+    if rank_column not in summary.columns:
+        raise KeyError(f"Missing ranking column: {rank_column}")
+    ranked = _coerce_numeric_columns(
+        summary,
+        (rank_column, "test_balanced_accuracy", "val_balanced_accuracy"),
+    )
+    return (
+        ranked
+        .sort_values(
+            [rank_column, "test_balanced_accuracy", "val_balanced_accuracy"],
+            ascending=[False, False, False],
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+def rank_sweep_by_causal_delay(summary: pd.DataFrame) -> pd.DataFrame:
+    """Rank sweep rows by valid nonnegative xcov delay, then quality metrics.
+
+    Negative xcov delay means the prediction trace leads the label trace. Those
+    rows are kept for review but ranked after rows with nonnegative delay.
+    """
+
+    ranked = _coerce_numeric_columns(
+        summary,
+        (
+            "test_xcov_delay_sec",
+            "test_xcov_peak_coeff",
+            "test_balanced_accuracy",
+            "val_balanced_accuracy",
+        ),
+    )
+    ranked["delay_rank_group"] = 2
+    ranked.loc[ranked["test_xcov_delay_sec"] >= 0, "delay_rank_group"] = 0
+    ranked.loc[ranked["test_xcov_delay_sec"] < 0, "delay_rank_group"] = 1
+    return (
+        ranked
+        .sort_values(
+            [
+                "delay_rank_group",
+                "test_xcov_delay_sec",
+                "test_xcov_peak_coeff",
+                "test_balanced_accuracy",
+                "val_balanced_accuracy",
+            ],
+            ascending=[True, True, False, False, False],
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+def select_lowest_causal_delay_variant(summary: pd.DataFrame) -> pd.Series:
+    """Return the sweep row with the lowest valid nonnegative xcov delay."""
+
+    ranked = rank_sweep_by_causal_delay(summary)
+    causal = ranked[ranked["delay_rank_group"] == 0]
+    if causal.empty:
+        raise ValueError(
+            "No valid nonnegative xcov delays were found. Review the full summary "
+            "for negative-delay variants or failed xcov estimates."
+        )
+    return causal.iloc[0]
+
 def offline_train_test_sweep(
     train_labeled_npz: PathLike,
     test_labeled_npz: PathLike,
@@ -372,6 +448,9 @@ __all__ = [
     "class_names_from_checkpoint",
     "load_checkpoint",
     "offline_train_test_sweep",
+    "rank_sweep_by_causal_delay",
+    "rank_sweep_summary",
+    "select_lowest_causal_delay_variant",
     "train_lstm",
     "train_validate_pipeline",
     "window_config_from_checkpoint",
