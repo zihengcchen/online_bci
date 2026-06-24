@@ -259,6 +259,8 @@ def build_train_val_dataset(
     labeled_npz_paths: Sequence[PathLike],
     window_config: WindowConfig,
     training_config: TrainingConfig,
+    normalizer_mean: Optional[np.ndarray] = None,
+    normalizer_std: Optional[np.ndarray] = None,
 ) -> DatasetBundle:
     """Make windows from one or more labeled 5-minute recordings."""
 
@@ -304,7 +306,11 @@ def build_train_val_dataset(
     train_table = table_cat.iloc[:split].copy().reset_index(drop=True)
     val_table = table_cat.iloc[split:].copy().reset_index(drop=True)
 
-    mean, std = fit_normalizer(X_train_raw)
+    if normalizer_mean is None or normalizer_std is None:
+        mean, std = fit_normalizer(X_train_raw)
+    else:
+        mean = np.asarray(normalizer_mean, dtype=np.float32)
+        std = np.asarray(normalizer_std, dtype=np.float32)
     X_train = apply_normalizer(X_train_raw, mean, std)
     X_val = apply_normalizer(X_val_raw, mean, std)
 

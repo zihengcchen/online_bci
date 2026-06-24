@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
+import shutil
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -55,6 +57,9 @@ def train_lstm(
     bundle: DatasetBundle,
     training_config: TrainingConfig,
     output_dir: PathLike,
+    initial_checkpoint_path: Optional[PathLike] = None,
+    checkpoint_name: str = "lstm_checkpoint.pt",
+    extra_checkpoint_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Train and validate the LSTM, then save checkpoint and CSV artifacts."""
 
@@ -64,13 +69,29 @@ def train_lstm(
 
     input_size = int(bundle.X_train.shape[-1])
     num_classes = int(max(len(bundle.class_names), np.max(bundle.y_train) + 1, np.max(bundle.y_val) + 1))
-    model = LSTMClassifier(
-        input_size=input_size,
-        hidden_size=int(training_config.hidden_size),
-        num_layers=int(training_config.num_layers),
-        num_classes=num_classes,
-        dropout=float(training_config.dropout),
-    ).to(device)
+    initial_checkpoint = None
+    if initial_checkpoint_path is None:
+        model_config = {
+            "input_size": input_size,
+            "hidden_size": int(training_config.hidden_size),
+            "num_layers": int(training_config.num_layers),
+            "num_classes": num_classes,
+            "dropout": float(training_config.dropout),
+        }
+        model = LSTMClassifier(**model_config).to(device)
+    else:
+        model, initial_checkpoint, device = load_checkpoint(initial_checkpoint_path, device=str(device))
+        model_config = dict(initial_checkpoint["model_config"])
+        if int(model_config.get("input_size", -1)) != input_size:
+            raise ValueError(
+                f"Checkpoint input_size={model_config.get('input_size')} does not match "
+                f"dataset input_size={input_size}. Check channels/window settings."
+            )
+        if int(model_config.get("num_classes", -1)) != num_classes:
+            raise ValueError(
+                f"Checkpoint num_classes={model_config.get('num_classes')} does not match "
+                f"dataset num_classes={num_classes}. Check class labels."
+            )
 
     train_loader = DataLoader(
         WindowDataset(bundle.X_train, bundle.y_train),
@@ -141,16 +162,10 @@ def train_lstm(
     val_predictions["pred_label"] = val_pred
     add_probability_columns(val_predictions, val_prob, bundle.class_names)
 
-    checkpoint_path = output_dir / "lstm_checkpoint.pt"
+    checkpoint_path = output_dir / str(checkpoint_name)
     checkpoint = {
         "model_state_dict": model.state_dict(),
-        "model_config": {
-            "input_size": input_size,
-            "hidden_size": int(training_config.hidden_size),
-            "num_layers": int(training_config.num_layers),
-            "num_classes": num_classes,
-            "dropout": float(training_config.dropout),
-        },
+        "model_config": model_config,
         "window_config": asdict(bundle.window_config),
         "training_config": asdict(training_config),
         "normalizer_mean": bundle.normalizer_mean,
@@ -161,6 +176,11 @@ def train_lstm(
         "final_val_summary": val_summary.to_dict(orient="records"),
         "history": history,
     }
+    if initial_checkpoint_path is not None:
+        checkpoint["continued_from_checkpoint"] = str(initial_checkpoint_path)
+        checkpoint["previous_checkpoint_source_files"] = tuple(initial_checkpoint.get("source_files", ())) if initial_checkpoint else tuple()
+    if extra_checkpoint_metadata:
+        checkpoint.update(extra_checkpoint_metadata)
     torch.save(checkpoint, checkpoint_path)
 
     history_csv = output_dir / "training_history.csv"
@@ -224,6 +244,197 @@ def train_validate_pipeline(
     bundle = build_train_val_dataset(labeled_npz_paths, window_config, training_config)
     result = train_lstm(bundle, training_config, output_dir)
     result["dataset_bundle"] = bundle
+    return result
+
+def labeled_training_paths_for_runs(
+    runs_root: PathLike,
+    run_ids: Sequence[str],
+    labeled_subdir: str = "labeled_training",
+    pattern: str = "*.npz",
+) -> List[Path]:
+    """Return labeled training NPZ paths for one or more run folders."""
+
+    runs_root = Path(runs_root)
+    paths: List[Path] = []
+    missing: List[str] = []
+    for run_id in run_ids:
+        labeled_dir = runs_root / str(run_id) / labeled_subdir
+        run_paths = sorted(path for path in labeled_dir.glob(pattern) if path.is_file())
+        if not run_paths:
+            missing.append(str(labeled_dir))
+        paths.extend(run_paths)
+    if missing:
+        raise FileNotFoundError(
+            "No labeled training NPZ files found in: " + ", ".join(missing)
+        )
+    return paths
+
+def _same_path(a: PathLike, b: PathLike) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except FileNotFoundError:
+        return Path(a).absolute() == Path(b).absolute()
+
+def _copy_checkpoint(source: PathLike, destination: PathLike) -> Path:
+    source = Path(source)
+    destination = Path(destination)
+    if not source.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not _same_path(source, destination):
+        shutil.copy2(source, destination)
+    return destination
+
+def _append_general_model_log(log_csv: PathLike, row: Dict[str, Any]) -> Path:
+    log_csv = Path(log_csv)
+    log_csv.parent.mkdir(parents=True, exist_ok=True)
+    row = {key: value for key, value in row.items()}
+    row["created_at"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_df = pd.DataFrame([row])
+    if log_csv.exists():
+        old_df = pd.read_csv(log_csv)
+        new_df = pd.concat([old_df, new_df], ignore_index=True)
+    new_df.to_csv(log_csv, index=False)
+    return log_csv
+
+def _compatible_window_config(checkpoint: Dict[str, Any], requested: Optional[WindowConfig]) -> WindowConfig:
+    checkpoint_cfg = window_config_from_checkpoint(checkpoint)
+    if requested is None:
+        return checkpoint_cfg
+
+    checks = (
+        ("feature_mode", canonical_feature_mode(requested.feature_mode), canonical_feature_mode(checkpoint_cfg.feature_mode)),
+        ("window_sec", float(requested.window_sec), float(checkpoint_cfg.window_sec)),
+        ("stride_sec", float(requested.stride_sec), float(checkpoint_cfg.stride_sec)),
+        ("label_mode", str(requested.label_mode).lower(), str(checkpoint_cfg.label_mode).lower()),
+    )
+    mismatches = []
+    for name, requested_value, checkpoint_value in checks:
+        if isinstance(requested_value, float):
+            ok = np.isclose(requested_value, checkpoint_value)
+        else:
+            ok = requested_value == checkpoint_value
+        if not ok:
+            mismatches.append(f"{name}: requested={requested_value!r}, checkpoint={checkpoint_value!r}")
+    if mismatches:
+        raise ValueError(
+            "General-model checkpoint settings do not match the requested window config: "
+            + "; ".join(mismatches)
+        )
+    return requested
+
+def initialize_general_model(
+    source_checkpoint_path: PathLike,
+    general_model_path: PathLike,
+    snapshot_path: Optional[PathLike] = None,
+    update_name: str = "",
+    log_csv: Optional[PathLike] = None,
+) -> Dict[str, Any]:
+    """Initialize ``general_model.pt`` by copying an existing run checkpoint."""
+
+    general_model_path = _copy_checkpoint(source_checkpoint_path, general_model_path)
+    snapshot = _copy_checkpoint(general_model_path, snapshot_path) if snapshot_path is not None else None
+    log_path = None
+    if log_csv is not None:
+        log_path = _append_general_model_log(
+            log_csv,
+            {
+                "mode": "initialized",
+                "update_name": update_name,
+                "source_checkpoint": str(source_checkpoint_path),
+                "general_model_path": str(general_model_path),
+                "snapshot_path": "" if snapshot is None else str(snapshot),
+            },
+        )
+    return {
+        "mode": "initialized",
+        "general_model_path": general_model_path,
+        "snapshot_path": snapshot,
+        "log_csv": log_path,
+    }
+
+def update_general_model(
+    labeled_npz_paths: Sequence[PathLike],
+    general_model_path: PathLike,
+    output_dir: PathLike,
+    training_config: Optional[TrainingConfig] = None,
+    window_config: Optional[WindowConfig] = None,
+    snapshot_path: Optional[PathLike] = None,
+    update_name: str = "",
+    log_csv: Optional[PathLike] = None,
+) -> Dict[str, Any]:
+    """Continue training ``general_model.pt`` using selected labeled run data.
+
+    The existing checkpoint normalizer is reused so input scaling remains stable
+    across updates. To reduce forgetting, pass labeled paths from multiple runs
+    instead of only the newest run.
+    """
+
+    general_model_path = Path(general_model_path)
+    if not general_model_path.exists():
+        raise FileNotFoundError(f"General model checkpoint not found: {general_model_path}")
+    output_dir = ensure_dir(output_dir)
+    training_config = training_config or TrainingConfig()
+
+    _, checkpoint, _ = load_checkpoint(general_model_path, device=training_config.device)
+    if "normalizer_mean" not in checkpoint or "normalizer_std" not in checkpoint:
+        raise KeyError("General model checkpoint is missing normalizer_mean/normalizer_std.")
+    win_cfg = _compatible_window_config(checkpoint, window_config)
+
+    bundle = build_train_val_dataset(
+        labeled_npz_paths,
+        win_cfg,
+        training_config,
+        normalizer_mean=checkpoint["normalizer_mean"],
+        normalizer_std=checkpoint["normalizer_std"],
+    )
+    result = train_lstm(
+        bundle,
+        training_config,
+        output_dir,
+        initial_checkpoint_path=general_model_path,
+        checkpoint_name="general_model.pt",
+        extra_checkpoint_metadata={
+            "general_model_update": True,
+            "general_model_update_name": str(update_name),
+            "general_model_input_checkpoint": str(general_model_path),
+        },
+    )
+
+    updated_checkpoint = Path(result["checkpoint_path"])
+    _copy_checkpoint(updated_checkpoint, general_model_path)
+    snapshot = _copy_checkpoint(general_model_path, snapshot_path) if snapshot_path is not None else None
+
+    log_path = None
+    if log_csv is not None:
+        val_summary = result["validation_summary"].iloc[0].to_dict() if len(result["validation_summary"]) else {}
+        log_path = _append_general_model_log(
+            log_csv,
+            {
+                "mode": "continued_training",
+                "update_name": update_name,
+                "general_model_path": str(general_model_path),
+                "update_checkpoint_path": str(updated_checkpoint),
+                "snapshot_path": "" if snapshot is None else str(snapshot),
+                "n_labeled_files": int(len(labeled_npz_paths)),
+                "labeled_files": ";".join(str(path) for path in labeled_npz_paths),
+                "window_sec": float(win_cfg.window_sec),
+                "stride_sec": float(win_cfg.stride_sec),
+                "label_mode": str(win_cfg.label_mode),
+                "val_accuracy": val_summary.get("accuracy", np.nan),
+                "val_balanced_accuracy": val_summary.get("balanced_accuracy", np.nan),
+            },
+        )
+
+    result.update(
+        {
+            "mode": "continued_training",
+            "general_model_path": general_model_path,
+            "snapshot_path": snapshot,
+            "log_csv": log_path,
+            "dataset_bundle": bundle,
+        }
+    )
     return result
 
 def slugify_config_value(value: Any) -> str:
@@ -446,8 +657,11 @@ __all__ = [
     "WindowConfig",
     "build_train_val_dataset",
     "class_names_from_checkpoint",
+    "initialize_general_model",
+    "labeled_training_paths_for_runs",
     "load_checkpoint",
     "offline_train_test_sweep",
+    "update_general_model",
     "rank_sweep_by_causal_delay",
     "rank_sweep_summary",
     "select_lowest_causal_delay_variant",
