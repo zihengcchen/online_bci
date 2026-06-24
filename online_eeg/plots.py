@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -229,9 +229,128 @@ def plot_xcov_curve(
     plt.tight_layout()
     return fig, ax
 
+def _offline_variant_mask(
+    summary: pd.DataFrame,
+    window_sec: float,
+    stride_sec: float,
+    label_mode: str,
+    feature_mode: Optional[str],
+) -> np.ndarray:
+    required = {"window_sec", "stride_sec", "label_mode"}
+    if feature_mode is not None:
+        required.add("feature_mode")
+    missing = sorted(required.difference(summary.columns))
+    if missing:
+        raise KeyError(f"Summary is missing required columns: {missing}.")
+
+    mask = (
+        np.isclose(pd.to_numeric(summary["window_sec"], errors="coerce"), float(window_sec))
+        & np.isclose(pd.to_numeric(summary["stride_sec"], errors="coerce"), float(stride_sec))
+        & (summary["label_mode"].astype(str).str.lower() == str(label_mode).lower())
+    )
+    if feature_mode is not None:
+        mask = mask & (summary["feature_mode"].astype(str).str.lower() == str(feature_mode).lower())
+    return np.asarray(mask, dtype=bool)
+
+def select_offline_variant_by_settings(
+    summary: pd.DataFrame,
+    window_sec: float,
+    stride_sec: float,
+    label_mode: str,
+    feature_mode: Optional[str] = "filtered_signal",
+) -> pd.Series:
+    """Return the offline sweep row matching one window/stride/label setting."""
+
+    mask = _offline_variant_mask(summary, window_sec, stride_sec, label_mode, feature_mode)
+    matches = summary.loc[mask].copy()
+    if matches.empty:
+        available_columns = [
+            col for col in ("feature_mode", "window_sec", "stride_sec", "label_mode", "variant")
+            if col in summary.columns
+        ]
+        available = summary[available_columns].drop_duplicates().sort_values(available_columns).head(20)
+        raise ValueError(
+            "No offline variant matched "
+            f"feature_mode={feature_mode!r}, window_sec={window_sec}, "
+            f"stride_sec={stride_sec}, label_mode={label_mode!r}. "
+            f"First available settings:\n{available.to_string(index=False)}"
+        )
+    return matches.iloc[0]
+
+def plot_offline_variant_trace_and_xcov(
+    summary: pd.DataFrame,
+    labeled_npz: PathLike,
+    window_sec: float,
+    stride_sec: float,
+    label_mode: str,
+    feature_mode: Optional[str] = "filtered_signal",
+    channel_names: Sequence[str] = ("O1", "Oz", "O2", "POz"),
+    max_duration_sec: Optional[float] = None,
+    show_true_labels: bool = True,
+    legend_loc: str = "center right",
+    title_prefix: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Load one offline sweep variant by settings and plot trace plus xcov.
+
+    This is intended for notebook comparisons: keep the ranked best/lowest
+    sections unchanged, then call this helper with any window, stride, and label
+    mode you want to inspect side by side.
+    """
+
+    try:
+        from .testing import load_test_variant_artifacts
+    except ImportError:
+        from testing import load_test_variant_artifacts
+
+    row = select_offline_variant_by_settings(
+        summary=summary,
+        window_sec=window_sec,
+        stride_sec=stride_sec,
+        label_mode=label_mode,
+        feature_mode=feature_mode,
+    )
+    artifacts = load_test_variant_artifacts(row, labeled_npz)
+    variant = str(row.get("variant", "selected variant"))
+    if title_prefix is None:
+        title_prefix = (
+            f"Offline variant window={float(window_sec):g}s, "
+            f"stride={float(stride_sec):g}s, labels={label_mode}"
+        )
+
+    trace_fig, trace_axes = plot_predictions_overlay(
+        labeled_npz,
+        artifacts["predictions"],
+        max_duration_sec=max_duration_sec,
+        channel_names=channel_names,
+        show_true_labels=show_true_labels,
+        legend_loc=legend_loc,
+    )
+    trace_axes[0].set_title(f"{title_prefix}: {variant}")
+
+    xcov_fig = None
+    xcov_ax = None
+    if artifacts["xcov_curve"] is not None and artifacts["xcov_delay_summary"] is not None:
+        xcov_fig, xcov_ax = plot_xcov_curve(
+            artifacts["xcov_curve"],
+            artifacts["xcov_delay_summary"],
+            title=f"Prediction xcov lag for {title_prefix}: {variant}",
+            legend_loc=legend_loc,
+        )
+
+    return {
+        "row": row,
+        "artifacts": artifacts,
+        "trace_fig": trace_fig,
+        "trace_axes": trace_axes,
+        "xcov_fig": xcov_fig,
+        "xcov_ax": xcov_ax,
+    }
+
 
 __all__ = [
     "plot_labeled_recording",
     "plot_predictions_overlay",
     "plot_xcov_curve",
+    "plot_offline_variant_trace_and_xcov",
+    "select_offline_variant_by_settings",
 ]
