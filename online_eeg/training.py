@@ -63,7 +63,7 @@ def train_lstm(
 ) -> Dict[str, Any]:
     """Train and validate the LSTM, then save checkpoint and CSV artifacts."""
 
-    set_seed(int(training_config.seed))
+    set_seed(int(training_config.seed), deterministic=bool(training_config.deterministic))
     output_dir = ensure_dir(output_dir)
     device = _device(training_config)
 
@@ -375,6 +375,7 @@ def update_general_model(
         raise FileNotFoundError(f"General model checkpoint not found: {general_model_path}")
     output_dir = ensure_dir(output_dir)
     training_config = training_config or TrainingConfig()
+    set_seed(int(training_config.seed), deterministic=bool(training_config.deterministic))
 
     _, checkpoint, _ = load_checkpoint(general_model_path, device=training_config.device)
     if "normalizer_mean" not in checkpoint or "normalizer_std" not in checkpoint:

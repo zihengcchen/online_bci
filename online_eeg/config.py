@@ -85,6 +85,7 @@ class TrainingConfig:
     epochs: int = 20
     lr: float = 1e-3
     seed: int = 888
+    deterministic: bool = True
     device: Optional[str] = None
 
 @dataclass

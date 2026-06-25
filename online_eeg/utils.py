@@ -22,7 +22,15 @@ def ensure_dir(path: PathLike) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, deterministic: bool = True) -> None:
+    if deterministic:
+        valid_cublas_configs = {":4096:8", ":16:8"}
+        had_valid_cublas_config = os.environ.get("CUBLAS_WORKSPACE_CONFIG") in valid_cublas_configs
+        if not had_valid_cublas_config:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    else:
+        had_valid_cublas_config = True
+
     import torch
 
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -31,6 +39,26 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
+    if deterministic:
+        if torch.cuda.is_initialized() and not had_valid_cublas_config:
+            raise RuntimeError(
+                "CUDA was initialized before CUBLAS_WORKSPACE_CONFIG was set. "
+                "Restart Python with CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic training."
+            )
+        torch.backends.cudnn.deterministic = True
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch, "use_deterministic_algorithms"):
+            torch.use_deterministic_algorithms(True)
+        else:
+            raise RuntimeError("Deterministic training requires torch.use_deterministic_algorithms.")
+    else:
+        if hasattr(torch, "use_deterministic_algorithms"):
+            torch.use_deterministic_algorithms(False)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = False
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Path):
