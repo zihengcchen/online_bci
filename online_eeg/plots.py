@@ -10,10 +10,56 @@ import pandas as pd
 
 try:
     from .config import PathLike
+    from .acquisition import load_raw_recording
     from .preprocessing import _cue_onset_times_for_plot, load_labeled_recording
 except ImportError:
     from config import PathLike
+    from acquisition import load_raw_recording
     from preprocessing import _cue_onset_times_for_plot, load_labeled_recording
+
+
+def plot_raw_recording(
+    raw_npz: PathLike,
+    max_duration_sec: Optional[float] = None,
+    channel_names: Optional[Sequence[str]] = None,
+):
+    import matplotlib.pyplot as plt
+
+    rec = load_raw_recording(raw_npz)
+    data = np.asarray(rec["data"], dtype=np.float32)
+    fs = int(rec["samplerate"])
+    channels = tuple(int(ch) for ch in rec["channels"])
+    if data.shape[0] == 0:
+        raise ValueError(f"Raw recording {raw_npz} has no samples.")
+
+    n = data.shape[0]
+    if max_duration_sec is not None:
+        n = min(n, int(round(float(max_duration_sec) * fs)))
+    t = np.arange(n, dtype=np.float64) / float(fs)
+
+    fig, axes = plt.subplots(
+        data.shape[1],
+        1,
+        sharex=True,
+        figsize=(14, max(2.5, 1.5 * data.shape[1])),
+        squeeze=False,
+    )
+    axes_flat = axes.reshape(-1)
+    for idx, ax in enumerate(axes_flat):
+        hardware_channel = channels[idx] if idx < len(channels) else idx + 1
+        label = (
+            str(channel_names[idx])
+            if channel_names is not None and idx < len(channel_names)
+            else f"Channel {hardware_channel}"
+        )
+        ax.plot(t, data[:n, idx], linewidth=0.7)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+
+    axes_flat[-1].set_xlabel("Time (s)")
+    axes_flat[0].set_title(f"Raw recording: {Path(raw_npz).name}")
+    plt.tight_layout()
+    return fig, axes_flat
 
 
 def plot_labeled_recording(
@@ -348,6 +394,7 @@ def plot_offline_variant_trace_and_xcov(
 
 
 __all__ = [
+    "plot_raw_recording",
     "plot_labeled_recording",
     "plot_predictions_overlay",
     "plot_xcov_curve",
