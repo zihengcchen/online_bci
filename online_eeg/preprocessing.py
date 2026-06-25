@@ -330,6 +330,23 @@ def preprocess_eeg_signal(
     )
     return eeg.astype(np.float32)
 
+def _extract_optional_hardware_channels(
+    data: np.ndarray,
+    acquired_channels: Sequence[int],
+    wanted_channels: Sequence[int],
+) -> Tuple[np.ndarray, Tuple[int, ...], Tuple[int, ...]]:
+    """Extract optional channels without failing old recordings that lack them."""
+
+    wanted = tuple(int(ch) for ch in wanted_channels)
+    acquired = tuple(int(ch) for ch in acquired_channels)
+    available = tuple(ch for ch in wanted if ch in acquired)
+    missing = tuple(ch for ch in wanted if ch not in acquired)
+    n_samples = _as_2d_samples_channels(data).shape[0]
+    if not available:
+        return np.empty((n_samples, 0), dtype=np.float32), available, missing
+    extracted = extract_hardware_channels(data, acquired, available)
+    return extracted.astype(np.float32), available, missing
+
 def preprocess_recording(
     raw_npz: PathLike,
     output_npz: PathLike,
@@ -344,6 +361,11 @@ def preprocess_recording(
     channels = tuple(raw["channels"])
 
     eeg_raw = extract_hardware_channels(data, channels, preprocess_config.eeg_channels)
+    eog_raw, eog_channels, missing_eog_channels = _extract_optional_hardware_channels(
+        data,
+        channels,
+        getattr(preprocess_config, "eog_channels", ()),
+    )
     audio = extract_hardware_channels(data, channels, (preprocess_config.audio_channel,))[:, 0]
 
     eeg = preprocess_eeg_signal(eeg_raw, fs=fs, preprocess_config=preprocess_config)
@@ -365,6 +387,8 @@ def preprocess_recording(
         output_npz,
         eeg=eeg.astype(np.float32),
         eeg_raw=eeg_raw.astype(np.float32),
+        eog=eog_raw.astype(np.float32),
+        eog_raw=eog_raw.astype(np.float32),
         audio=audio.astype(np.float32),
         audio_envelope=np.asarray(onset_info["envelope"], dtype=np.float64),
         audio_threshold=np.array(float(onset_info["threshold"]), dtype=np.float64),
@@ -374,6 +398,9 @@ def preprocess_recording(
         samplerate=np.array(fs, dtype=np.int64),
         acquired_channels=np.asarray(channels, dtype=np.int64),
         eeg_channels=np.asarray(preprocess_config.eeg_channels, dtype=np.int64),
+        eog_channels=np.asarray(eog_channels, dtype=np.int64),
+        requested_eog_channels=np.asarray(getattr(preprocess_config, "eog_channels", ()), dtype=np.int64),
+        missing_eog_channels=np.asarray(missing_eog_channels, dtype=np.int64),
         audio_channel=np.array(int(preprocess_config.audio_channel), dtype=np.int64),
         class_names=np.asarray(label_config.class_names),
         source_raw_npz=np.array(str(raw_npz)),
@@ -419,6 +446,11 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         (cue_onset_samples >= 0) & (cue_onset_samples < n)
     ]
     class_names = tuple(str(x) for x in labeled["class_names"]) if "class_names" in labeled.files else tuple()
+    eog_raw = (
+        _as_2d_samples_channels(labeled["eog_raw"])[:n].astype(np.float32)
+        if "eog_raw" in labeled.files
+        else None
+    )
     return {
         "eeg": eeg[:n].astype(np.float32),
         "eeg_raw": (
@@ -426,6 +458,8 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
             if "eeg_raw" in labeled.files
             else None
         ),
+        "eog": eog_raw,
+        "eog_raw": eog_raw,
         "sample_labels": labels[:n].astype(np.int64),
         "samplerate": fs,
         "class_names": class_names,
@@ -444,6 +478,21 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         "eeg_channels": (
             tuple(int(x) for x in np.asarray(labeled["eeg_channels"]).reshape(-1))
             if "eeg_channels" in labeled.files
+            else tuple()
+        ),
+        "eog_channels": (
+            tuple(int(x) for x in np.asarray(labeled["eog_channels"]).reshape(-1))
+            if "eog_channels" in labeled.files
+            else tuple()
+        ),
+        "requested_eog_channels": (
+            tuple(int(x) for x in np.asarray(labeled["requested_eog_channels"]).reshape(-1))
+            if "requested_eog_channels" in labeled.files
+            else tuple()
+        ),
+        "missing_eog_channels": (
+            tuple(int(x) for x in np.asarray(labeled["missing_eog_channels"]).reshape(-1))
+            if "missing_eog_channels" in labeled.files
             else tuple()
         ),
         "audio_channel": int(np.asarray(labeled["audio_channel"]).item()) if "audio_channel" in labeled.files else None,
@@ -494,6 +543,17 @@ def labeled_preprocess_summary(
                     "bandpass_high_hz": preprocess_config.get("bandpass_high_hz", np.nan),
                     "notch_hz": preprocess_config.get("notch_hz", np.nan),
                     "eeg_channels": preprocess_config.get("eeg_channels", np.nan),
+                    "eog_channels": (
+                        tuple(int(x) for x in np.asarray(labeled["eog_channels"]).reshape(-1))
+                        if "eog_channels" in files
+                        else preprocess_config.get("eog_channels", np.nan)
+                    ),
+                    "requested_eog_channels": preprocess_config.get("eog_channels", np.nan),
+                    "missing_eog_channels": (
+                        tuple(int(x) for x in np.asarray(labeled["missing_eog_channels"]).reshape(-1))
+                        if "missing_eog_channels" in files
+                        else tuple()
+                    ),
                     "audio_channel": preprocess_config.get("audio_channel", np.nan),
                     "source_raw_npz": (
                         str(np.asarray(labeled["source_raw_npz"]).item())

@@ -20,7 +20,7 @@ class AcquisitionConfig:
     """BIOPAC MP150 collection settings."""
 
     samplerate: int = 200
-    channels: Tuple[int, ...] = (1, 2, 3, 4, 16)
+    channels: Tuple[int, ...] = (1, 2, 3, 4, 5, 16)
     chunk_sec: float = 0.10
 
 @dataclass
@@ -55,6 +55,7 @@ class PreprocessConfig:
     """Signal preprocessing and channel layout."""
 
     eeg_channels: Tuple[int, ...] = (1, 2, 3, 4)
+    eog_channels: Tuple[int, ...] = (5,)
     audio_channel: int = 16
     apply_software_filters: bool = True
     bandpass_low_hz: Optional[float] = 1.0
