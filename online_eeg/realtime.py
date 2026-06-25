@@ -221,15 +221,17 @@ def run_realtime_mp150_prediction(
     live_plot_window_sec: Optional[float] = 15.0,
     live_plot_update_sec: Optional[float] = None,
     prediction_stride_sec: Optional[float] = None,
+    prediction_window_sec: Optional[float] = None,
     prediction_flush_every: Optional[int] = 10,
 ) -> Dict[str, Any]:
     """Stream MP150 data and emit causal model predictions in real time.
 
     The full raw trial is saved continuously. Model predictions use the
-    checkpoint's window length and feature settings. ``prediction_stride_sec``
-    can override how often the window advances at test time. Prediction CSV
-    writes are flushed every ``prediction_flush_every`` rows; use 0 or None to
-    rely on normal file buffering until the trial ends.
+    checkpoint's feature settings. ``prediction_window_sec`` and
+    ``prediction_stride_sec`` can override the checkpoint window length and how
+    often the window advances at test time. Prediction CSV writes are flushed
+    every ``prediction_flush_every`` rows; use 0 or None to rely on normal file
+    buffering until the trial ends.
     """
 
     output_dir = ensure_dir(output_dir)
@@ -256,7 +258,8 @@ def run_realtime_mp150_prediction(
         else None
     )
 
-    window_samples = int(round(float(win_cfg.window_sec) * fs))
+    window_sec = float(win_cfg.window_sec if prediction_window_sec is None else prediction_window_sec)
+    window_samples = int(round(window_sec * fs))
     stride_sec = float(win_cfg.stride_sec if prediction_stride_sec is None else prediction_stride_sec)
     stride_samples = int(round(stride_sec * fs))
     class_names = class_names_from_checkpoint(checkpoint)
@@ -276,6 +279,9 @@ def run_realtime_mp150_prediction(
         "wall_time_sec",
         "end_sample",
         "end_time_sec",
+        "window_samples",
+        "stride_samples",
+        "feature_mode",
         "pred_label",
     ] + [f"prob_{name}" for name in class_names]
 
@@ -351,6 +357,9 @@ def run_realtime_mp150_prediction(
                         "wall_time_sec": time.time() - start_wall,
                         "end_sample": int(next_prediction_end),
                         "end_time_sec": float(next_prediction_end) / float(fs),
+                        "window_samples": int(window_samples),
+                        "stride_samples": int(stride_samples),
+                        "feature_mode": str(win_cfg.feature_mode),
                         "pred_label": int(pred[0]),
                     }
                     for key, value in probability_column_map(prob, class_names).items():
@@ -426,7 +435,9 @@ def run_realtime_mp150_prediction(
             "mode": "realtime_prediction",
             "checkpoint_path": str(checkpoint_path),
             "feature_mode": str(win_cfg.feature_mode),
-            "window_sec": float(win_cfg.window_sec),
+            "checkpoint_window_sec": float(win_cfg.window_sec),
+            "prediction_window_sec": float(window_sec),
+            "window_sec": float(window_sec),
             "window_samples": int(window_samples),
             "checkpoint_stride_sec": float(win_cfg.stride_sec),
             "prediction_stride_sec": float(stride_sec),

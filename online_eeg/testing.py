@@ -370,6 +370,7 @@ def collect_preprocess_and_test_trial(
     duration_sec: float = 300.0,
     trial_name: str = "test_trial",
     prediction_stride_sec: Optional[float] = None,
+    prediction_window_sec: Optional[float] = None,
     prediction_flush_every: Optional[int] = 10,
 ) -> Dict[str, Any]:
     """Collect one continuous trial, predict on sliding windows, then score posthoc."""
@@ -382,6 +383,7 @@ def collect_preprocess_and_test_trial(
         duration_sec=duration_sec,
         trial_name=trial_name,
         print_every_prediction=True,
+        prediction_window_sec=prediction_window_sec,
         prediction_stride_sec=prediction_stride_sec,
         prediction_flush_every=prediction_flush_every,
     )
