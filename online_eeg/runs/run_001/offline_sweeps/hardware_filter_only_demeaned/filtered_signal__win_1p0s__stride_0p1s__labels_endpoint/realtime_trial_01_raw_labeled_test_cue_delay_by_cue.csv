@@ -1,0 +1,4 @@
+cue_index,cue_onset_sample,cue_onset_time_sec,label_transition_sample,label_transition_time_sec,from_label,from_label_name,target_label,target_label_name,transition_type,first_correct_prediction_time_sec,cue_to_first_correct_prediction_sec,predicted_transition_time_sec,cue_to_predicted_transition_sec,sustained_prediction_time_sec,sustained_prediction_confirm_time_sec,cue_to_sustained_prediction_sec,sustained_windows,matched_first_correct_prediction,matched_predicted_transition,matched_sustained_prediction
+0,1715,8.575,1715,8.575,0,Eyes Open,1,Eyes Closed,0->1,8.8,0.22500000000000142,8.8,0.22500000000000142,8.8,9.0,0.22500000000000142,3,True,True,True
+1,3331,16.655,3331,16.655,1,Eyes Closed,0,Eyes Open,1->0,16.9,0.24499999999999744,16.9,0.24499999999999744,16.9,17.1,0.24499999999999744,3,True,True,True
+2,5030,25.15,5030,25.15,0,Eyes Open,1,Eyes Closed,0->1,25.5,0.3500000000000014,25.5,0.3500000000000014,25.5,25.7,0.3500000000000014,3,True,True,True

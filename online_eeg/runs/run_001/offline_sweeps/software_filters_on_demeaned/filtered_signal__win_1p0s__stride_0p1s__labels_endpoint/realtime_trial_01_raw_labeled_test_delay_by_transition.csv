@@ -1,0 +1,4 @@
+true_transition_sample,true_transition_time_sec,from_label,to_label,transition_type,first_correct_prediction_time_sec,delay_to_first_correct_prediction_sec,predicted_transition_time_sec,delay_to_predicted_transition_sec,matched_first_correct_prediction,matched_predicted_transition
+1715,8.575,0,1,0->1,9.1,0.5250000000000004,9.1,0.5250000000000004,True,True
+3331,16.655,1,0,1->0,17.5,0.8449999999999989,17.5,0.8449999999999989,True,True
+5030,25.15,0,1,0->1,26.9,1.75,26.9,1.75,True,True

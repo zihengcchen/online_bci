@@ -1,0 +1,4 @@
+cue_index,onset_sample,onset_time_sec,label_start_sample,label_end_sample,label_start_time_sec,label_end_time_sec,label,label_name,peak_value
+0,1715,8.575,1715,3331,8.575,16.655,1,Eyes Closed,1.0380224637339195
+1,3331,16.655,3331,5030,16.655,25.15,0,Eyes Open,1.035589685206294
+2,5030,25.15,5030,6000,25.15,30.0,1,Eyes Closed,1.0405090684865623
