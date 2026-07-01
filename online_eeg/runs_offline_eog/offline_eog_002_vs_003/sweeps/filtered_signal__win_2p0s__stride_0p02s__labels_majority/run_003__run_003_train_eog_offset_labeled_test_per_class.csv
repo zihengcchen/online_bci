@@ -1,0 +1,3 @@
+label,class_name,support,predicted,precision,recall
+0,Eyes Open,7667,0,,0.0
+1,Eyes Closed,7234,14901,0.48547077377357223,1.0

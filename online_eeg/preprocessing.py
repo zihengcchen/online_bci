@@ -347,6 +347,19 @@ def _extract_optional_hardware_channels(
     extracted = extract_hardware_channels(data, acquired, available)
     return extracted.astype(np.float32), available, missing
 
+def normalized_signal_derivative(data: np.ndarray) -> np.ndarray:
+    """Median/MAD-normalize channels, then return the first difference."""
+
+    arr = _as_2d_samples_channels(data).astype(np.float64)
+    if arr.shape[1] == 0:
+        return np.empty_like(arr, dtype=np.float32)
+    centered = arr - np.nanmedian(arr, axis=0, keepdims=True)
+    mad = np.nanmedian(np.abs(centered), axis=0)
+    scale = np.where(np.isfinite(mad) & (mad > 0), mad, 1.0)
+    normalized = centered / scale[None, :]
+    derivative = np.diff(normalized, axis=0, prepend=normalized[:1])
+    return derivative.astype(np.float32)
+
 def preprocess_recording(
     raw_npz: PathLike,
     output_npz: PathLike,
@@ -437,21 +450,33 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
     labels = np.asarray(labeled["sample_labels"], dtype=np.int64).reshape(-1)
     n = min(eeg.shape[0], len(labels))
     fs = int(np.asarray(labeled["samplerate"]).item())
-    cue_onset_samples = (
-        np.asarray(labeled["cue_onset_samples"], dtype=np.int64).reshape(-1)
-        if "cue_onset_samples" in labeled.files
-        else np.empty(0, dtype=np.int64)
-    )
-    cue_onset_samples = cue_onset_samples[
-        (cue_onset_samples >= 0) & (cue_onset_samples < n)
-    ]
+    def _optional_sample_array(key: str) -> np.ndarray:
+        samples = (
+            np.asarray(labeled[key], dtype=np.int64).reshape(-1)
+            if key in labeled.files
+            else np.empty(0, dtype=np.int64)
+        )
+        return samples[(samples >= 0) & (samples < n)]
+
+    cue_onset_samples = _optional_sample_array("cue_onset_samples")
+    audio_cue_onset_samples = _optional_sample_array("audio_cue_onset_samples")
+    if audio_cue_onset_samples.size == 0:
+        audio_cue_onset_samples = cue_onset_samples
+    eog_label_event_samples = _optional_sample_array("eog_label_event_samples")
+    eog_activity_start_samples = _optional_sample_array("eog_activity_start_samples")
+    eog_activity_end_samples = _optional_sample_array("eog_activity_end_samples")
     class_names = tuple(str(x) for x in labeled["class_names"]) if "class_names" in labeled.files else tuple()
     eog_raw = (
         _as_2d_samples_channels(labeled["eog_raw"])[:n].astype(np.float32)
         if "eog_raw" in labeled.files
         else None
     )
-    return {
+    eog_normalized_derivative = (
+        _as_2d_samples_channels(labeled["eog_normalized_derivative"])[:n].astype(np.float32)
+        if "eog_normalized_derivative" in labeled.files
+        else normalized_signal_derivative(eog_raw)[:n] if eog_raw is not None else None
+    )
+    result = {
         "eeg": eeg[:n].astype(np.float32),
         "eeg_raw": (
             _as_2d_samples_channels(labeled["eeg_raw"])[:n].astype(np.float32)
@@ -460,6 +485,7 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         ),
         "eog": eog_raw,
         "eog_raw": eog_raw,
+        "eog_normalized_derivative": eog_normalized_derivative,
         "sample_labels": labels[:n].astype(np.int64),
         "samplerate": fs,
         "class_names": class_names,
@@ -470,6 +496,34 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         "audio_threshold": float(np.asarray(labeled["audio_threshold"]).item()) if "audio_threshold" in labeled.files else None,
         "cue_onset_samples": cue_onset_samples,
         "cue_onset_times_sec": cue_onset_samples.astype(np.float64) / float(fs),
+        "audio_cue_onset_samples": audio_cue_onset_samples,
+        "audio_cue_onset_times_sec": audio_cue_onset_samples.astype(np.float64) / float(fs),
+        "eog_label_event_samples": eog_label_event_samples,
+        "eog_label_event_times_sec": eog_label_event_samples.astype(np.float64) / float(fs),
+        "eog_activity_start_samples": eog_activity_start_samples,
+        "eog_activity_start_times_sec": eog_activity_start_samples.astype(np.float64) / float(fs),
+        "eog_activity_end_samples": eog_activity_end_samples,
+        "eog_activity_end_times_sec": eog_activity_end_samples.astype(np.float64) / float(fs),
+        "eog_activity_score": (
+            np.asarray(labeled["eog_activity_score"], dtype=np.float64).reshape(-1)[:n]
+            if "eog_activity_score" in labeled.files
+            else None
+        ),
+        "eog_activity_threshold": (
+            float(np.asarray(labeled["eog_activity_threshold"]).item())
+            if "eog_activity_threshold" in labeled.files
+            else None
+        ),
+        "eog_detection_source": (
+            str(np.asarray(labeled["eog_detection_source"]).item())
+            if "eog_detection_source" in labeled.files
+            else None
+        ),
+        "eog_detection_reference": (
+            str(np.asarray(labeled["eog_detection_reference"]).item())
+            if "eog_detection_reference" in labeled.files
+            else None
+        ),
         "acquired_channels": (
             tuple(int(x) for x in np.asarray(labeled["acquired_channels"]).reshape(-1))
             if "acquired_channels" in labeled.files
@@ -497,6 +551,8 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         ),
         "audio_channel": int(np.asarray(labeled["audio_channel"]).item()) if "audio_channel" in labeled.files else None,
     }
+    labeled.close()
+    return result
 
 def labeled_preprocess_summary(
     labeled_npz_paths: Union[PathLike, Sequence[PathLike], Dict[str, PathLike]],
@@ -575,6 +631,30 @@ def _cue_onset_times_for_plot(rec: Dict[str, Any], max_duration_sec: Optional[fl
         cue_times = cue_times[cue_times <= float(max_duration_sec)]
     return cue_times
 
+def _sample_times_for_plot(
+    rec: Dict[str, Any],
+    sample_key: str,
+    max_duration_sec: Optional[float],
+) -> np.ndarray:
+    fs = int(rec["samplerate"])
+    samples = np.asarray(rec.get(sample_key, []), dtype=np.int64).reshape(-1)
+    times = samples.astype(np.float64) / float(fs)
+    if max_duration_sec is not None:
+        times = times[times <= float(max_duration_sec)]
+    return times
+
+def _audio_cue_times_for_plot(rec: Dict[str, Any], max_duration_sec: Optional[float]) -> np.ndarray:
+    times = _sample_times_for_plot(rec, "audio_cue_onset_samples", max_duration_sec)
+    if times.size == 0:
+        times = _cue_onset_times_for_plot(rec, max_duration_sec)
+    return times
+
+def _eog_offset_times_for_plot(rec: Dict[str, Any], max_duration_sec: Optional[float]) -> np.ndarray:
+    times = _sample_times_for_plot(rec, "eog_activity_end_samples", max_duration_sec)
+    if times.size == 0:
+        times = _sample_times_for_plot(rec, "eog_label_event_samples", max_duration_sec)
+    return times
+
 
 __all__ = [
     "AudioLabelConfig",
@@ -585,6 +665,7 @@ __all__ = [
     "bandpass_filter",
     "notch_filter",
     "preprocess_eeg_signal",
+    "normalized_signal_derivative",
     "preprocess_recording",
     "preprocess_many_recordings",
     "load_labeled_recording",
