@@ -26,6 +26,19 @@ except ImportError:
     )
 
 
+def _eog_processing_trace_for_plot(rec: Dict[str, Any]) -> Tuple[Optional[np.ndarray], str]:
+    mode = str(rec.get("eog_detection_signal_mode") or "").strip().lower()
+    detection_signal = rec.get("eog_detection_signal")
+    if detection_signal is not None and mode in {"normalized_derivative", "normalized_derivative_lowpass"}:
+        if mode == "normalized_derivative_lowpass":
+            cutoff = rec.get("eog_derivative_lowpass_hz")
+            if cutoff is not None and np.isfinite(float(cutoff)):
+                return np.asarray(detection_signal), f"EOG norm derivative LP{float(cutoff):g}"
+            return np.asarray(detection_signal), "EOG norm derivative low-pass"
+        return np.asarray(detection_signal), "EOG norm derivative"
+    return rec.get("eog_normalized_derivative"), "EOG norm derivative"
+
+
 def plot_raw_recording(
     raw_npz: PathLike,
     max_duration_sec: Optional[float] = 60.0,
@@ -83,7 +96,7 @@ def plot_labeled_recording(
     eog = rec.get("eog_raw")
     if eog is None:
         eog = rec.get("eog")
-    eog_derivative = rec.get("eog_normalized_derivative")
+    eog_derivative, eog_derivative_label = _eog_processing_trace_for_plot(rec)
     audio = rec.get("audio")
     acquired_channels = tuple(rec.get("acquired_channels") or ())
     eeg_channels = tuple(rec.get("eeg_channels") or range(1, eeg.shape[1] + 1))
@@ -120,7 +133,7 @@ def plot_labeled_recording(
             eog_derivative = eog_derivative[:, None]
         for idx in range(eog_derivative.shape[1]):
             hardware_channel = int(eog_channels[idx]) if idx < len(eog_channels) else len(channel_traces) + 1
-            channel_traces.append((hardware_channel, f"EOG norm derivative {hardware_channel}", eog_derivative[:n, idx]))
+            channel_traces.append((hardware_channel, f"{eog_derivative_label} {hardware_channel}", eog_derivative[:n, idx]))
     if audio is not None:
         hardware_channel = int(audio_channel) if audio_channel is not None else len(channel_traces) + 1
         channel_traces.append((hardware_channel, f"Audio channel {hardware_channel}", np.asarray(audio)[:n]))
@@ -194,7 +207,7 @@ def plot_predictions_overlay(
     eog = rec.get("eog_raw")
     if eog is None:
         eog = rec.get("eog")
-    eog_derivative = rec.get("eog_normalized_derivative")
+    eog_derivative, eog_derivative_label = _eog_processing_trace_for_plot(rec)
     audio = rec.get("audio")
     eog_channels = tuple(rec.get("eog_channels") or ())
     audio_channel = rec.get("audio_channel")
@@ -224,7 +237,7 @@ def plot_predictions_overlay(
             for eog_idx in range(eog_derivative.shape[1]):
                 hardware_channel = int(eog_channels[eog_idx]) if eog_idx < len(eog_channels) else eog_idx + 1
                 aux_traces.append((
-                    f"EOG norm derivative {hardware_channel}",
+                    f"{eog_derivative_label} {hardware_channel}",
                     eog_derivative[:n, eog_idx],
                     "tab:brown",
                 ))

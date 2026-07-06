@@ -476,6 +476,11 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         if "eog_normalized_derivative" in labeled.files
         else normalized_signal_derivative(eog_raw)[:n] if eog_raw is not None else None
     )
+    eog_detection_signal = (
+        _as_2d_samples_channels(labeled["eog_detection_signal"])[:n].astype(np.float32)
+        if "eog_detection_signal" in labeled.files
+        else None
+    )
     result = {
         "eeg": eeg[:n].astype(np.float32),
         "eeg_raw": (
@@ -486,6 +491,7 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
         "eog": eog_raw,
         "eog_raw": eog_raw,
         "eog_normalized_derivative": eog_normalized_derivative,
+        "eog_detection_signal": eog_detection_signal,
         "sample_labels": labels[:n].astype(np.int64),
         "samplerate": fs,
         "class_names": class_names,

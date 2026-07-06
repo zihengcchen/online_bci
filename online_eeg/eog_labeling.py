@@ -363,6 +363,7 @@ def detect_eog_offsets_after_audio_cues(
     return {
         "score": source_trace.astype(np.float64),
         "threshold": np.nan,
+        "detection_signal": detection_signal.astype(np.float64),
         "active_segments": events[["start_sample", "end_sample"]].to_numpy(dtype=np.int64),
         "all_events": events,
         "event_start_samples": np.asarray(event_starts, dtype=np.int64),
@@ -444,6 +445,7 @@ def preprocess_recording_with_eog_offset_labels(
         eog=eog_raw.astype(np.float32),
         eog_raw=eog_raw.astype(np.float32),
         eog_normalized_derivative=eog_derivative.astype(np.float32),
+        eog_detection_signal=np.asarray(eog_info["detection_signal"], dtype=np.float32),
         audio=audio.astype(np.float32),
         audio_envelope=np.asarray(audio_onset_info["envelope"], dtype=np.float64),
         audio_threshold=np.array(float(audio_onset_info["threshold"]), dtype=np.float64),
