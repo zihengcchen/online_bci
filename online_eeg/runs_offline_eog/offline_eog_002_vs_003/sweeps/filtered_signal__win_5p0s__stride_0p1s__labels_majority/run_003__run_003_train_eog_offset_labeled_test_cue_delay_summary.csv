@@ -1,2 +1,2 @@
 n_cues,n_matched_first_correct,mean_cue_to_first_correct_sec,median_cue_to_first_correct_sec,n_matched_predicted_transition,mean_cue_to_predicted_transition_sec,median_cue_to_predicted_transition_sec,n_matched_sustained,mean_cue_to_sustained_prediction_sec,median_cue_to_sustained_prediction_sec
-40,40,0.7388750000000012,0.6574999999999918,34,0.8592647058823548,0.7199999999999847,40,0.7388750000000012,0.6574999999999918
+40,38,1.13013157894737,0.4374999999999929,37,1.2508108108108127,0.6149999999999807,35,2.1108571428571445,0.9350000000000023
