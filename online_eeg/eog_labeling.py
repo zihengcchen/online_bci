@@ -15,6 +15,7 @@ try:
     from .config import AudioLabelConfig, PathLike, PreprocessConfig
     from .preprocessing import (
         _extract_optional_hardware_channels,
+        bandpass_filter,
         detect_audio_onsets,
         labels_from_audio_onsets,
         normalized_signal_derivative,
@@ -27,6 +28,7 @@ except ImportError:
     from config import AudioLabelConfig, PathLike, PreprocessConfig
     from preprocessing import (
         _extract_optional_hardware_channels,
+        bandpass_filter,
         detect_audio_onsets,
         labels_from_audio_onsets,
         normalized_signal_derivative,
@@ -55,6 +57,9 @@ class EogOffsetLabelConfig:
 
     neurokit_clean_method: str = "neurokit"
     neurokit_peak_method: str = "brainstorm"
+    detection_signal_mode: str = "raw"
+    derivative_lowpass_hz: Optional[float] = None
+    derivative_lowpass_order: int = 4
     detect_both_polarities: bool = True
     eog_channel_index: int = 0
     min_activity_duration_sec: float = 0.05
@@ -79,6 +84,44 @@ def eog_activity_score(
     activity = np.nanmax(np.abs(derivative), axis=1)
     window_samples = max(1, int(round(float(activity_window_sec) * int(fs))))
     return rolling_rms_causal(activity, window_samples)
+
+
+def prepare_eog_detection_signal(
+    eog_raw: np.ndarray,
+    fs: int,
+    config: EogOffsetLabelConfig,
+) -> np.ndarray:
+    """Return the signal that should be passed into NeuroKit2 EOG detection."""
+
+    mode = str(config.detection_signal_mode).strip().lower()
+    eog = np.asarray(eog_raw, dtype=np.float64)
+    if eog.ndim == 1:
+        eog = eog[:, None]
+
+    if mode == "raw":
+        return eog
+    if mode == "normalized_derivative":
+        return normalized_signal_derivative(eog).astype(np.float64)
+    if mode == "normalized_derivative_lowpass":
+        derivative = normalized_signal_derivative(eog).astype(np.float64)
+        cutoff = config.derivative_lowpass_hz
+        if cutoff is None:
+            raise ValueError(
+                "derivative_lowpass_hz must be set when detection_signal_mode="
+                "'normalized_derivative_lowpass'."
+            )
+        return bandpass_filter(
+            derivative,
+            fs=int(fs),
+            low_hz=None,
+            high_hz=float(cutoff),
+            order=int(config.derivative_lowpass_order),
+        ).astype(np.float64)
+
+    raise ValueError(
+        "detection_signal_mode must be one of 'raw', 'normalized_derivative', "
+        f"or 'normalized_derivative_lowpass', got {config.detection_signal_mode!r}."
+    )
 
 
 def _neurokit_eog_events(
@@ -212,7 +255,8 @@ def detect_eog_offsets_after_audio_cues(
     """Find the NeuroKit2 EOG event end associated with each audio cue."""
 
     fs = int(fs)
-    events, source_trace = _neurokit_eog_events(eog_raw, fs=fs, config=config)
+    detection_signal = prepare_eog_detection_signal(eog_raw, fs=fs, config=config)
+    events, source_trace = _neurokit_eog_events(detection_signal, fs=fs, config=config)
 
     audio_cue_samples = np.asarray(audio_cue_samples, dtype=np.int64).reshape(-1)
     n_samples = int(np.asarray(eog_raw).shape[0])
@@ -302,6 +346,12 @@ def detect_eog_offsets_after_audio_cues(
                 "neurokit_event_polarity": polarity,
                 "merged_neurokit_events": merged_neurokit_events,
                 "eog_detection_source": detection_source,
+                "eog_detection_signal_mode": str(config.detection_signal_mode),
+                "eog_derivative_lowpass_hz": (
+                    np.nan
+                    if config.derivative_lowpass_hz is None
+                    else float(config.derivative_lowpass_hz)
+                ),
                 "label_transition_sample": int(label_sample),
                 "label_transition_time_sec": label_sample / float(fs),
                 "audio_to_eog_offset_sec": (label_sample - cue_sample) / float(fs),
@@ -405,10 +455,18 @@ def preprocess_recording_with_eog_offset_labels(
         eog_activity_start_samples=np.asarray(eog_info["event_start_samples"], dtype=np.int64),
         eog_activity_end_samples=np.asarray(eog_info["event_end_samples"], dtype=np.int64),
         eog_label_event_samples=np.asarray(eog_info["label_event_samples"], dtype=np.int64),
+        eog_detection_signal_mode=np.array(str(eog_label_config.detection_signal_mode)),
+        eog_derivative_lowpass_hz=np.array(
+            np.nan
+            if eog_label_config.derivative_lowpass_hz is None
+            else float(eog_label_config.derivative_lowpass_hz),
+            dtype=np.float64,
+        ),
         eog_detection_source=np.array(
             "NeuroKit2 eog_clean/eog_findpeaks/eog_features; "
             f"clean={eog_label_config.neurokit_clean_method}; "
-            f"peaks={eog_label_config.neurokit_peak_method}"
+            f"peaks={eog_label_config.neurokit_peak_method}; "
+            f"detection_signal={eog_label_config.detection_signal_mode}"
         ),
         eog_detection_reference=np.array(
             "NeuroKit2 EOG docs: https://neuropsychology.github.io/NeuroKit/functions/eog.html; "
@@ -443,5 +501,6 @@ __all__ = [
     "EogOffsetLabelConfig",
     "detect_eog_offsets_after_audio_cues",
     "eog_activity_score",
+    "prepare_eog_detection_signal",
     "preprocess_recording_with_eog_offset_labels",
 ]

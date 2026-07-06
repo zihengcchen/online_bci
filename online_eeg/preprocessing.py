@@ -519,6 +519,16 @@ def load_labeled_recording(path: PathLike) -> Dict[str, Any]:
             if "eog_detection_source" in labeled.files
             else None
         ),
+        "eog_detection_signal_mode": (
+            str(np.asarray(labeled["eog_detection_signal_mode"]).item())
+            if "eog_detection_signal_mode" in labeled.files
+            else None
+        ),
+        "eog_derivative_lowpass_hz": (
+            float(np.asarray(labeled["eog_derivative_lowpass_hz"]).item())
+            if "eog_derivative_lowpass_hz" in labeled.files
+            else None
+        ),
         "eog_detection_reference": (
             str(np.asarray(labeled["eog_detection_reference"]).item())
             if "eog_detection_reference" in labeled.files
