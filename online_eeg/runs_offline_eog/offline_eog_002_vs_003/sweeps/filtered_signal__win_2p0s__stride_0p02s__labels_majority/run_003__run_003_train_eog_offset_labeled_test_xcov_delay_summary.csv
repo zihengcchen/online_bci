@@ -1,2 +1,2 @@
 target_label,target_label_name,prediction_signal_column,xcov_delay_sec,xcov_lag_samples,xcov_peak_coeff,max_lag_sec,n_valid_samples
-1,Eyes Closed,prob_Eyes Closed,0.23,46,0.7719992493917045,10.0,59600
+1,Eyes Closed,prob_Eyes Closed,0.585,117,0.8862536436078372,10.0,59600

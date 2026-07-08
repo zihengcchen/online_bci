@@ -1,2 +1,0 @@
-start_sample,end_sample,start_time_sec,end_time_sec,label,true_label,pred_label,prob_Eyes Open,prob_Eyes Closed
-59796,59996,298.98,299.98,0,0,0,0.8862444,0.11375556
