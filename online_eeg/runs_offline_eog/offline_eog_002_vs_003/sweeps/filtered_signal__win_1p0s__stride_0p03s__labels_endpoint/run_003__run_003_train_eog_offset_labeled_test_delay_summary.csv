@@ -1,2 +1,2 @@
 n_true_transitions,n_matched_first_correct,mean_delay_to_first_correct_sec,median_delay_to_first_correct_sec,n_matched_predicted_transition,mean_delay_to_predicted_transition_sec,median_delay_to_predicted_transition_sec
-40,38,0.9265789473684227,0.025000000000005684,24,1.567916666666667,1.4575000000000031
+40,40,0.4093749999999992,0.3374999999999986,37,0.5625675675675671,0.38999999999998636

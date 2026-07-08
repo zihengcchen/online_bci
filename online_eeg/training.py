@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
+import json
 from pathlib import Path
 import shutil
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -52,6 +54,8 @@ except ImportError:
         make_prediction_aligned_eeg_tables_for_labeled_sources,
     )
 
+DEFAULT_MODELS_DIR = Path(__file__).resolve().parent / "models"
+
 
 def train_lstm(
     bundle: DatasetBundle,
@@ -60,6 +64,8 @@ def train_lstm(
     initial_checkpoint_path: Optional[PathLike] = None,
     checkpoint_name: str = "lstm_checkpoint.pt",
     extra_checkpoint_metadata: Optional[Dict[str, Any]] = None,
+    models_dir: Optional[PathLike] = None,
+    model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Train and validate the LSTM, then save checkpoint and CSV artifacts."""
 
@@ -163,6 +169,14 @@ def train_lstm(
     add_probability_columns(val_predictions, val_prob, bundle.class_names)
 
     checkpoint_path = output_dir / str(checkpoint_name)
+    model_catalog_dir = ensure_dir(DEFAULT_MODELS_DIR if models_dir is None else models_dir)
+    model_catalog_name = model_name or model_checkpoint_name(
+        bundle,
+        training_config,
+        checkpoint_name=checkpoint_name,
+        continued_from=initial_checkpoint_path,
+    )
+    model_catalog_path = model_catalog_dir / model_catalog_name
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "model_config": model_config,
@@ -175,13 +189,29 @@ def train_lstm(
         "source_files": tuple(bundle.source_files),
         "final_val_summary": val_summary.to_dict(orient="records"),
         "history": history,
+        "artifact_checkpoint_path": str(checkpoint_path),
+        "model_catalog_name": str(model_catalog_name),
+        "model_catalog_path": str(model_catalog_path),
+        "models_dir": str(model_catalog_dir),
     }
+    source_preprocess_configs = _labeled_preprocess_configs(bundle.source_files)
+    unique_preprocess_configs = _unique_config_dicts(source_preprocess_configs)
+    if source_preprocess_configs:
+        checkpoint["source_preprocess_configs"] = source_preprocess_configs
+    if len(unique_preprocess_configs) == 1:
+        checkpoint["preprocess_config"] = unique_preprocess_configs[0]
+    elif len(unique_preprocess_configs) > 1:
+        checkpoint["preprocess_config_mismatch_warning"] = (
+            "Training labeled files were created with multiple preprocessing configs."
+        )
     if initial_checkpoint_path is not None:
         checkpoint["continued_from_checkpoint"] = str(initial_checkpoint_path)
         checkpoint["previous_checkpoint_source_files"] = tuple(initial_checkpoint.get("source_files", ())) if initial_checkpoint else tuple()
     if extra_checkpoint_metadata:
         checkpoint.update(extra_checkpoint_metadata)
     torch.save(checkpoint, checkpoint_path)
+    if not _same_path(checkpoint_path, model_catalog_path):
+        torch.save(checkpoint, model_catalog_path)
 
     history_csv = output_dir / "training_history.csv"
     val_predictions_csv = output_dir / "validation_predictions.csv"
@@ -205,7 +235,10 @@ def train_lstm(
     return {
         "model": model,
         "checkpoint": checkpoint,
-        "checkpoint_path": checkpoint_path,
+        "checkpoint_path": model_catalog_path,
+        "artifact_checkpoint_path": checkpoint_path,
+        "model_catalog_path": model_catalog_path,
+        "model_catalog_name": model_catalog_name,
         "history": history_df,
         "validation_predictions": val_predictions,
         "validation_aligned_predictions": val_aligned_predictions,
@@ -240,9 +273,17 @@ def train_validate_pipeline(
     output_dir: PathLike,
     window_config: WindowConfig,
     training_config: TrainingConfig,
+    models_dir: Optional[PathLike] = None,
+    model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     bundle = build_train_val_dataset(labeled_npz_paths, window_config, training_config)
-    result = train_lstm(bundle, training_config, output_dir)
+    result = train_lstm(
+        bundle,
+        training_config,
+        output_dir,
+        models_dir=models_dir,
+        model_name=model_name,
+    )
     result["dataset_bundle"] = bundle
     return result
 
@@ -459,6 +500,97 @@ def slugify_config_value(value: Any) -> str:
         text = text.replace("__", "_")
     return text.strip("_") or "value"
 
+def _short_digest(text: str, length: int = 10) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:length]
+
+def _shorten_slug(text: str, max_len: int = 120) -> str:
+    text = text.strip("_-") or "value"
+    if len(text) <= max_len:
+        return text
+    digest = _short_digest(text)
+    keep = max(1, max_len - len(digest) - 2)
+    return f"{text[:keep].strip('_-')}__{digest}"
+
+def _source_run_slug(path: PathLike) -> str:
+    stem = Path(path).stem
+    for suffix in ("_eog_offset_labeled", "_labeled"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    if "__" in stem:
+        stem = stem.split("__", 1)[0]
+    return slugify_config_value(stem)
+
+def _source_runs_slug(source_files: Sequence[PathLike]) -> str:
+    run_slugs: List[str] = []
+    seen = set()
+    for source_file in source_files:
+        slug = _source_run_slug(source_file)
+        if slug and slug not in seen:
+            seen.add(slug)
+            run_slugs.append(slug)
+    return _shorten_slug("--".join(run_slugs) if run_slugs else "unknown")
+
+def model_checkpoint_name(
+    bundle: DatasetBundle,
+    training_config: TrainingConfig,
+    checkpoint_name: str = "lstm_checkpoint.pt",
+    continued_from: Optional[PathLike] = None,
+) -> str:
+    """Return a deterministic, descriptive checkpoint filename for ``models/``."""
+
+    win = bundle.window_config
+    source_key = "|".join(Path(path).stem for path in bundle.source_files)
+    stem_parts = [
+        f"runs_{_source_runs_slug(bundle.source_files)}",
+        f"files_{slugify_config_value(len(bundle.source_files))}",
+        f"src_{_short_digest(source_key)}",
+        canonical_feature_mode(str(win.feature_mode)),
+        f"win_{slugify_config_value(win.window_sec)}s",
+        f"stride_{slugify_config_value(win.stride_sec)}s",
+        f"labels_{slugify_config_value(win.label_mode)}",
+        f"h{slugify_config_value(training_config.hidden_size)}",
+        f"layers_{slugify_config_value(training_config.num_layers)}",
+        f"drop_{slugify_config_value(training_config.dropout)}",
+        f"epochs_{slugify_config_value(training_config.epochs)}",
+        f"lr_{slugify_config_value(training_config.lr)}",
+        f"batch_{slugify_config_value(training_config.batch_size)}",
+        f"trainfrac_{slugify_config_value(training_config.train_fraction)}",
+        f"seed_{slugify_config_value(training_config.seed)}",
+    ]
+    if continued_from is not None:
+        stem_parts.append(f"continued_{slugify_config_value(Path(continued_from).stem)}")
+    stem = _shorten_slug("__".join(stem_parts), max_len=180)
+    suffix = Path(str(checkpoint_name)).suffix or ".pt"
+    return f"{stem}{suffix}"
+
+def _labeled_preprocess_configs(source_files: Sequence[PathLike]) -> List[Dict[str, Any]]:
+    configs: List[Dict[str, Any]] = []
+    for source_file in source_files:
+        try:
+            labeled = np.load(Path(source_file), allow_pickle=True)
+        except FileNotFoundError:
+            continue
+        try:
+            if "preprocess_config_json" not in labeled.files:
+                continue
+            raw_json = str(np.asarray(labeled["preprocess_config_json"]).item())
+            if raw_json:
+                configs.append(json.loads(raw_json))
+        finally:
+            labeled.close()
+    return configs
+
+def _unique_config_dicts(configs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unique: List[Dict[str, Any]] = []
+    seen = set()
+    for config in configs:
+        key = json.dumps(config, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            unique.append(config)
+    return unique
+
 def _coerce_numeric_columns(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
     out = df.copy()
     for column in columns:
@@ -535,9 +667,142 @@ def select_lowest_causal_delay_variant(summary: pd.DataFrame) -> pd.Series:
         )
     return causal.iloc[0]
 
+def _optional_row_path(row: Any, key: str) -> Optional[Path]:
+    value = row.get(key, None)
+    if value is None:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or ";" in text:
+        return None
+    return Path(text)
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (FileNotFoundError, ValueError):
+        try:
+            path.absolute().relative_to(root.absolute())
+            return True
+        except ValueError:
+            return False
+
+def prune_offline_sweep_artifacts(
+    ranked_summary: pd.DataFrame,
+    top_n: Optional[int],
+    summary_csv: Optional[PathLike] = None,
+    sweep_dir: Optional[PathLike] = None,
+    remove_model_catalog: bool = True,
+) -> Dict[str, Any]:
+    """Keep only the top-N ranked offline sweep variants and remove the rest.
+
+    The input summary should already be ranked in the order to keep. The main
+    summary CSV is overwritten with the kept rows when ``summary_csv`` is given.
+    Removed variant directories are only deleted when they are inside
+    ``sweep_dir`` or the summary CSV's parent directory.
+    """
+
+    if top_n is None:
+        return {
+            "summary": ranked_summary.copy().reset_index(drop=True),
+            "removed_summary": ranked_summary.iloc[0:0].copy(),
+            "removed_variant_dirs": [],
+            "removed_model_paths": [],
+        }
+    top_n = int(top_n)
+    if top_n <= 0:
+        raise ValueError("top_n must be positive or None.")
+
+    ranked = ranked_summary.copy().reset_index(drop=True)
+    kept = ranked.head(top_n).copy().reset_index(drop=True)
+    removed = ranked.iloc[top_n:].copy().reset_index(drop=True)
+
+    summary_path = Path(summary_csv) if summary_csv is not None else None
+    safe_sweep_root = Path(sweep_dir) if sweep_dir is not None else (summary_path.parent if summary_path is not None else None)
+
+    kept_variant_dirs = {
+        path.resolve()
+        for _, row in kept.iterrows()
+        for path in [_optional_row_path(row, "variant_dir")]
+        if path is not None
+    }
+    kept_model_paths = {
+        path.resolve()
+        for _, row in kept.iterrows()
+        for key in ("model_catalog_path", "checkpoint_path")
+        for path in [_optional_row_path(row, key)]
+        if path is not None
+    }
+
+    removed_variant_dirs: List[str] = []
+    removed_model_paths: List[str] = []
+    for _, row in removed.iterrows():
+        variant_dir = _optional_row_path(row, "variant_dir")
+        if variant_dir is not None:
+            resolved_variant_dir = variant_dir.resolve()
+            if (
+                resolved_variant_dir not in kept_variant_dirs
+                and safe_sweep_root is not None
+                and _path_is_within(variant_dir, safe_sweep_root)
+                and variant_dir.exists()
+            ):
+                shutil.rmtree(variant_dir)
+                removed_variant_dirs.append(str(variant_dir))
+
+        if remove_model_catalog:
+            for key in ("model_catalog_path", "checkpoint_path"):
+                model_path = _optional_row_path(row, key)
+                if model_path is None:
+                    continue
+                resolved_model_path = model_path.resolve()
+                if resolved_model_path in kept_model_paths:
+                    continue
+                if model_path.exists() and model_path.is_file() and _path_is_within(model_path, DEFAULT_MODELS_DIR):
+                    model_path.unlink()
+                    removed_model_paths.append(str(model_path))
+
+    if summary_path is not None:
+        kept.to_csv(summary_path, index=False)
+
+    return {
+        "summary": kept,
+        "removed_summary": removed,
+        "removed_variant_dirs": removed_variant_dirs,
+        "removed_model_paths": removed_model_paths,
+    }
+
+def _as_path_list(paths: Union[PathLike, Sequence[PathLike]], name: str) -> List[Path]:
+    if isinstance(paths, (str, Path)):
+        result = [Path(paths)]
+    else:
+        result = [Path(path) for path in paths]
+    if not result:
+        raise ValueError(f"{name} cannot be empty.")
+    return result
+
+def _nanmean_from_rows(rows: Sequence[Dict[str, Any]], key: str) -> float:
+    values = np.asarray([row.get(key, np.nan) for row in rows], dtype=np.float64)
+    return float(np.nanmean(values)) if np.any(np.isfinite(values)) else np.nan
+
+def _nansum_from_rows(rows: Sequence[Dict[str, Any]], key: str) -> float:
+    values = np.asarray([row.get(key, np.nan) for row in rows], dtype=np.float64)
+    return float(np.nansum(values)) if values.size else np.nan
+
+def _first_nonempty_from_rows(rows: Sequence[Dict[str, Any]], key: str) -> str:
+    for row in rows:
+        value = row.get(key, "")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
 def offline_train_test_sweep(
-    train_labeled_npz: PathLike,
-    test_labeled_npz: PathLike,
+    train_labeled_npz: Union[PathLike, Sequence[PathLike]],
+    test_labeled_npz: Union[PathLike, Sequence[PathLike]],
     output_dir: PathLike,
     feature_modes: Sequence[str] = ("filtered_signal",),
     window_secs: Sequence[float] = (1.0, 1.5, 2.0),
@@ -546,16 +811,19 @@ def offline_train_test_sweep(
     label_mode: Any = "endpoint",
     label_modes: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """Train offline time-domain EEG model variants and test each on a labeled trial.
+    """Train offline time-domain EEG model variants and test on labeled trial(s).
 
     ``label_modes`` can include both ``"endpoint"`` and ``"majority"`` to make
     window-labeling strategy part of the sweep. ``label_mode`` is kept for
     existing single-mode calls, and can also receive a sequence for backwards
-    compatibility with exploratory notebooks.
+    compatibility with exploratory notebooks. ``train_labeled_npz`` and
+    ``test_labeled_npz`` each accept either one path or a sequence of paths.
     """
 
     output_dir = ensure_dir(output_dir)
     training_config = training_config or TrainingConfig()
+    train_labeled_npz_paths = _as_path_list(train_labeled_npz, "train_labeled_npz")
+    test_labeled_npz_paths = _as_path_list(test_labeled_npz, "test_labeled_npz")
     if label_modes is None:
         if isinstance(label_mode, str):
             label_modes = (label_mode,)
@@ -597,22 +865,47 @@ def offline_train_test_sweep(
                     variant_dir = ensure_dir(output_dir / variant_name)
 
                     train_result = train_validate_pipeline(
-                        labeled_npz_paths=[train_labeled_npz],
+                        labeled_npz_paths=train_labeled_npz_paths,
                         output_dir=variant_dir,
                         window_config=win_cfg,
                         training_config=training_config,
                     )
-                    test_result = predict_labeled_recording(
-                        labeled_npz=test_labeled_npz,
-                        checkpoint_path=train_result["checkpoint_path"],
-                        output_dir=variant_dir,
-                        batch_size=training_config.batch_size,
-                    )
+                    test_run_rows: List[Dict[str, Any]] = []
+                    for test_path in test_labeled_npz_paths:
+                        test_result = predict_labeled_recording(
+                            labeled_npz=test_path,
+                            checkpoint_path=train_result["checkpoint_path"],
+                            output_dir=variant_dir,
+                            batch_size=training_config.batch_size,
+                        )
+                        test_summary = test_result["summary"].iloc[0].to_dict()
+                        cue_delay_summary = test_result["cue_delay_summary"].iloc[0].to_dict()
+                        xcov_delay_summary = test_result["xcov_delay_summary"].iloc[0].to_dict()
+                        test_run_rows.append(
+                            {
+                                "test_labeled_npz": str(test_path),
+                                "test_stem": Path(test_path).stem,
+                                "test_prediction_csv": str(test_result.get("prediction_csv", "")),
+                                "test_aligned_prediction_csv": str(test_result.get("aligned_prediction_csv", "")),
+                                "test_accuracy": test_summary.get("accuracy", np.nan),
+                                "test_balanced_accuracy": test_summary.get("balanced_accuracy", np.nan),
+                                "test_n_windows": test_summary.get("n_windows", np.nan),
+                                "test_mean_cue_to_first_correct_sec": cue_delay_summary.get("mean_cue_to_first_correct_sec", np.nan),
+                                "test_median_cue_to_first_correct_sec": cue_delay_summary.get("median_cue_to_first_correct_sec", np.nan),
+                                "test_mean_cue_to_predicted_transition_sec": cue_delay_summary.get("mean_cue_to_predicted_transition_sec", np.nan),
+                                "test_median_cue_to_predicted_transition_sec": cue_delay_summary.get("median_cue_to_predicted_transition_sec", np.nan),
+                                "test_mean_cue_to_sustained_prediction_sec": cue_delay_summary.get("mean_cue_to_sustained_prediction_sec", np.nan),
+                                "test_median_cue_to_sustained_prediction_sec": cue_delay_summary.get("median_cue_to_sustained_prediction_sec", np.nan),
+                                "test_xcov_delay_sec": xcov_delay_summary.get("xcov_delay_sec", np.nan),
+                                "test_xcov_peak_coeff": xcov_delay_summary.get("xcov_peak_coeff", np.nan),
+                                "test_xcov_signal_column": xcov_delay_summary.get("prediction_signal_column", ""),
+                            }
+                        )
+                    test_runs_summary = pd.DataFrame(test_run_rows)
+                    test_runs_summary_csv = variant_dir / "test_runs_summary.csv"
+                    test_runs_summary.to_csv(test_runs_summary_csv, index=False)
 
                     val_summary = train_result["validation_summary"].iloc[0].to_dict()
-                    test_summary = test_result["summary"].iloc[0].to_dict()
-                    cue_delay_summary = test_result["cue_delay_summary"].iloc[0].to_dict()
-                    xcov_delay_summary = test_result["xcov_delay_summary"].iloc[0].to_dict()
                     row = {
                         "variant": variant_name,
                         "feature_mode": win_cfg.feature_mode,
@@ -620,23 +913,32 @@ def offline_train_test_sweep(
                         "window_sec": win_cfg.window_sec,
                         "stride_sec": win_cfg.stride_sec,
                         "checkpoint_path": str(train_result["checkpoint_path"]),
+                        "model_catalog_path": str(train_result.get("model_catalog_path", train_result["checkpoint_path"])),
+                        "model_catalog_name": str(train_result.get("model_catalog_name", Path(train_result["checkpoint_path"]).name)),
+                        "artifact_checkpoint_path": str(train_result.get("artifact_checkpoint_path", "")),
                         "variant_dir": str(variant_dir),
+                        "n_train_labeled_files": int(len(train_labeled_npz_paths)),
+                        "train_labeled_files": ";".join(str(path) for path in train_labeled_npz_paths),
+                        "n_test_labeled_files": int(len(test_labeled_npz_paths)),
+                        "test_labeled_files": ";".join(str(path) for path in test_labeled_npz_paths),
+                        "test_runs_summary_csv": str(test_runs_summary_csv),
                         "validation_aligned_prediction_csv": str(train_result.get("validation_aligned_prediction_csv", "")),
-                        "test_aligned_prediction_csv": str(test_result.get("aligned_prediction_csv", "")),
+                        "test_prediction_csv": ";".join(item["test_prediction_csv"] for item in test_run_rows),
+                        "test_aligned_prediction_csv": ";".join(item["test_aligned_prediction_csv"] for item in test_run_rows),
                         "val_accuracy": val_summary.get("accuracy", np.nan),
                         "val_balanced_accuracy": val_summary.get("balanced_accuracy", np.nan),
-                        "test_accuracy": test_summary.get("accuracy", np.nan),
-                        "test_balanced_accuracy": test_summary.get("balanced_accuracy", np.nan),
-                        "test_n_windows": test_summary.get("n_windows", np.nan),
-                        "test_mean_cue_to_first_correct_sec": cue_delay_summary.get("mean_cue_to_first_correct_sec", np.nan),
-                        "test_median_cue_to_first_correct_sec": cue_delay_summary.get("median_cue_to_first_correct_sec", np.nan),
-                        "test_mean_cue_to_predicted_transition_sec": cue_delay_summary.get("mean_cue_to_predicted_transition_sec", np.nan),
-                        "test_median_cue_to_predicted_transition_sec": cue_delay_summary.get("median_cue_to_predicted_transition_sec", np.nan),
-                        "test_mean_cue_to_sustained_prediction_sec": cue_delay_summary.get("mean_cue_to_sustained_prediction_sec", np.nan),
-                        "test_median_cue_to_sustained_prediction_sec": cue_delay_summary.get("median_cue_to_sustained_prediction_sec", np.nan),
-                        "test_xcov_delay_sec": xcov_delay_summary.get("xcov_delay_sec", np.nan),
-                        "test_xcov_peak_coeff": xcov_delay_summary.get("xcov_peak_coeff", np.nan),
-                        "test_xcov_signal_column": xcov_delay_summary.get("prediction_signal_column", ""),
+                        "test_accuracy": _nanmean_from_rows(test_run_rows, "test_accuracy"),
+                        "test_balanced_accuracy": _nanmean_from_rows(test_run_rows, "test_balanced_accuracy"),
+                        "test_n_windows": _nansum_from_rows(test_run_rows, "test_n_windows"),
+                        "test_mean_cue_to_first_correct_sec": _nanmean_from_rows(test_run_rows, "test_mean_cue_to_first_correct_sec"),
+                        "test_median_cue_to_first_correct_sec": _nanmean_from_rows(test_run_rows, "test_median_cue_to_first_correct_sec"),
+                        "test_mean_cue_to_predicted_transition_sec": _nanmean_from_rows(test_run_rows, "test_mean_cue_to_predicted_transition_sec"),
+                        "test_median_cue_to_predicted_transition_sec": _nanmean_from_rows(test_run_rows, "test_median_cue_to_predicted_transition_sec"),
+                        "test_mean_cue_to_sustained_prediction_sec": _nanmean_from_rows(test_run_rows, "test_mean_cue_to_sustained_prediction_sec"),
+                        "test_median_cue_to_sustained_prediction_sec": _nanmean_from_rows(test_run_rows, "test_median_cue_to_sustained_prediction_sec"),
+                        "test_xcov_delay_sec": _nanmean_from_rows(test_run_rows, "test_xcov_delay_sec"),
+                        "test_xcov_peak_coeff": _nanmean_from_rows(test_run_rows, "test_xcov_peak_coeff"),
+                        "test_xcov_signal_column": _first_nonempty_from_rows(test_run_rows, "test_xcov_signal_column"),
                     }
                     rows.append(row)
                     result_dirs.append(variant_dir)
@@ -661,7 +963,9 @@ __all__ = [
     "initialize_general_model",
     "labeled_training_paths_for_runs",
     "load_checkpoint",
+    "model_checkpoint_name",
     "offline_train_test_sweep",
+    "prune_offline_sweep_artifacts",
     "update_general_model",
     "rank_sweep_by_causal_delay",
     "rank_sweep_summary",

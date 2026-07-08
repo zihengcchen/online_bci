@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import asdict
 import json
 import sys
 import time
@@ -53,6 +54,54 @@ def _format_realtime_prediction_status(row: Dict[str, Any], class_names: Sequenc
         f"pred={pred_label} ({pred_name}) "
         f"probabilities: {', '.join(probability_parts)}"
     )
+
+def _normalize_config_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_normalize_config_value(item) for item in value]
+    if isinstance(value, list):
+        return [_normalize_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _normalize_config_value(item) for key, item in value.items()}
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+def _same_config_value(a: Any, b: Any) -> bool:
+    a = _normalize_config_value(a)
+    b = _normalize_config_value(b)
+    if a is None or b is None:
+        return a is None and b is None
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return bool(np.isclose(float(a), float(b), equal_nan=True))
+    return a == b
+
+def _validate_realtime_preprocess_config(
+    checkpoint: Dict[str, Any],
+    preprocess_config: PreprocessConfig,
+) -> None:
+    saved = checkpoint.get("preprocess_config")
+    if not isinstance(saved, dict):
+        return
+    current = asdict(preprocess_config)
+    checked_fields = (
+        "eeg_channels",
+        "apply_software_filters",
+        "bandpass_low_hz",
+        "bandpass_high_hz",
+        "notch_hz",
+        "notch_quality_factor",
+        "filter_order",
+        "demean_channels",
+    )
+    mismatches = []
+    for field in checked_fields:
+        if field in saved and field in current and not _same_config_value(saved[field], current[field]):
+            mismatches.append(f"{field}: checkpoint={saved[field]!r}, realtime={current[field]!r}")
+    if mismatches:
+        raise ValueError(
+            "Realtime preprocess_config does not match the preprocessing used for training: "
+            + "; ".join(mismatches)
+        )
 
 def _setup_realtime_plot(
     acquired_channels: Sequence[int],
@@ -240,6 +289,7 @@ def run_realtime_mp150_prediction(
     aligned_prediction_csv = output_dir / f"{trial_name}_realtime_predictions_aligned_eeg.csv"
 
     model, checkpoint, device = load_checkpoint(checkpoint_path)
+    _validate_realtime_preprocess_config(checkpoint, preprocess_config)
     win_cfg = window_config_from_checkpoint(checkpoint)
     fs = int(checkpoint["fs"])
     if int(acquisition_config.samplerate) != fs:

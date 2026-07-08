@@ -129,6 +129,8 @@ def _optional_path(value: Any, fallback: Path) -> Path:
     except (TypeError, ValueError):
         pass
     text = str(value).strip()
+    if ";" in text:
+        return fallback
     return Path(text) if text else fallback
 
 def test_variant_artifact_paths(
