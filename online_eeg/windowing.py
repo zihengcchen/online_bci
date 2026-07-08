@@ -94,6 +94,29 @@ def fit_normalizer(X_train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     std = np.where(std < 1e-6, 1.0, std)
     return mean.astype(np.float32), std.astype(np.float32)
 
+def identity_normalizer(X_train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    n_features = int(np.asarray(X_train).shape[-1])
+    mean = np.zeros((1, 1, n_features), dtype=np.float32)
+    std = np.ones((1, 1, n_features), dtype=np.float32)
+    return mean, std
+
+def canonical_normalization_mode(mode: str) -> str:
+    text = str(mode).strip().lower().replace("-", "_")
+    aliases = {
+        "zscore": "train_zscore",
+        "z_score": "train_zscore",
+        "train_z_score": "train_zscore",
+        "training_zscore": "train_zscore",
+        "training_z_score": "train_zscore",
+        "none": "none",
+        "off": "none",
+        "false": "none",
+    }
+    mode = aliases.get(text, text)
+    if mode not in {"train_zscore", "none"}:
+        raise ValueError("normalization must be 'train_zscore' or 'none'.")
+    return mode
+
 def apply_normalizer(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     std = np.where(np.asarray(std) < 1e-6, 1.0, std)
     return ((X - mean) / std).astype(np.float32)
@@ -306,8 +329,14 @@ def build_train_val_dataset(
     train_table = table_cat.iloc[:split].copy().reset_index(drop=True)
     val_table = table_cat.iloc[split:].copy().reset_index(drop=True)
 
+    normalization_mode = canonical_normalization_mode(
+        getattr(training_config, "normalization", "train_zscore")
+    )
     if normalizer_mean is None or normalizer_std is None:
-        mean, std = fit_normalizer(X_train_raw)
+        if normalization_mode == "none":
+            mean, std = identity_normalizer(X_train_raw)
+        else:
+            mean, std = fit_normalizer(X_train_raw)
     else:
         mean = np.asarray(normalizer_mean, dtype=np.float32)
         std = np.asarray(normalizer_std, dtype=np.float32)
@@ -342,6 +371,8 @@ __all__ = [
     "extract_window_features",
     "make_labeled_windows",
     "fit_normalizer",
+    "identity_normalizer",
+    "canonical_normalization_mode",
     "apply_normalizer",
     "make_prediction_aligned_eeg_table",
     "make_prediction_aligned_eeg_tables_for_labeled_sources",

@@ -32,6 +32,7 @@ try:
     from .windowing import (
         build_train_val_dataset,
         canonical_feature_mode,
+        canonical_normalization_mode,
         make_prediction_aligned_eeg_tables_for_labeled_sources,
     )
 except ImportError:
@@ -51,6 +52,7 @@ except ImportError:
     from windowing import (
         build_train_val_dataset,
         canonical_feature_mode,
+        canonical_normalization_mode,
         make_prediction_aligned_eeg_tables_for_labeled_sources,
     )
 
@@ -184,6 +186,7 @@ def train_lstm(
         "training_config": asdict(training_config),
         "normalizer_mean": bundle.normalizer_mean,
         "normalizer_std": bundle.normalizer_std,
+        "normalizer_mode": canonical_normalization_mode(getattr(training_config, "normalization", "train_zscore")),
         "fs": int(bundle.fs),
         "class_names": tuple(bundle.class_names),
         "source_files": tuple(bundle.source_files),
@@ -549,6 +552,7 @@ def model_checkpoint_name(
         f"win_{slugify_config_value(win.window_sec)}s",
         f"stride_{slugify_config_value(win.stride_sec)}s",
         f"labels_{slugify_config_value(win.label_mode)}",
+        f"norm_{slugify_config_value(canonical_normalization_mode(getattr(training_config, 'normalization', 'train_zscore')))}",
         f"h{slugify_config_value(training_config.hidden_size)}",
         f"layers_{slugify_config_value(training_config.num_layers)}",
         f"drop_{slugify_config_value(training_config.dropout)}",
@@ -912,6 +916,7 @@ def offline_train_test_sweep(
                         "label_mode": win_cfg.label_mode,
                         "window_sec": win_cfg.window_sec,
                         "stride_sec": win_cfg.stride_sec,
+                        "normalization": canonical_normalization_mode(getattr(training_config, "normalization", "train_zscore")),
                         "checkpoint_path": str(train_result["checkpoint_path"]),
                         "model_catalog_path": str(train_result.get("model_catalog_path", train_result["checkpoint_path"])),
                         "model_catalog_name": str(train_result.get("model_catalog_name", Path(train_result["checkpoint_path"]).name)),

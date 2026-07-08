@@ -86,6 +86,7 @@ class TrainingConfig:
     epochs: int = 20
     lr: float = 1e-3
     seed: int = 888
+    normalization: str = "train_zscore"
     deterministic: bool = True
     device: Optional[str] = None
 
