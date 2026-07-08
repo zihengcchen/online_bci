@@ -21,6 +21,7 @@
     "epochs": 20,
     "lr": 0.001,
     "seed": 888,
+    "normalization": "train_zscore",
     "deterministic": true,
     "device": null
   },
@@ -44,6 +45,7 @@
       ]
     ]
   ],
+  "normalizer_mode": "train_zscore",
   "fs": 200,
   "class_names": [
     "Eyes Open",
@@ -203,8 +205,8 @@
     }
   ],
   "artifact_checkpoint_path": "d:\\BME\\BCI\\online_bci\\online_eeg\\runs_offline_eog\\offline_eog_002_vs_003\\sweeps\\filtered_signal__win_1p0s__stride_0p03s__labels_majority\\lstm_checkpoint.pt",
-  "model_catalog_name": "runs_run_002--run_003__files_2__src_947cd7fccd__filtered_signal__win_1p0s__stride_0p03s__labels_majority__h64__layers_1__drop_0p2__epochs_20__lr_0p001__batch_64__trainf__47820e300d.pt",
-  "model_catalog_path": "D:\\BME\\BCI\\online_bci\\online_eeg\\models\\runs_run_002--run_003__files_2__src_947cd7fccd__filtered_signal__win_1p0s__stride_0p03s__labels_majority__h64__layers_1__drop_0p2__epochs_20__lr_0p001__batch_64__trainf__47820e300d.pt",
+  "model_catalog_name": "runs_run_002--run_003__files_2__src_947cd7fccd__filtered_signal__win_1p0s__stride_0p03s__labels_majority__norm_train_zscore__h64__layers_1__drop_0p2__epochs_20__lr_0p00__74af74aca5.pt",
+  "model_catalog_path": "D:\\BME\\BCI\\online_bci\\online_eeg\\models\\runs_run_002--run_003__files_2__src_947cd7fccd__filtered_signal__win_1p0s__stride_0p03s__labels_majority__norm_train_zscore__h64__layers_1__drop_0p2__epochs_20__lr_0p00__74af74aca5.pt",
   "models_dir": "D:\\BME\\BCI\\online_bci\\online_eeg\\models",
   "source_preprocess_configs": [
     {
