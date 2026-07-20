@@ -1,0 +1,15 @@
+# Copy/paste into powershell line by line
+
+conda config --set solver libmamba
+
+conda create -n super python=3.12
+conda activate super
+
+python -m pip install --upgrade pip setuptools wheel
+
+# CUDA PyTorch for Python
+pip3 install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu132
+
+python -m pip install -r cuda13_req.txt
+
+conda deactivate

@@ -1,0 +1,10 @@
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+h5py
+tqdm
+ipykernel
+geoopt
+neurokit2
