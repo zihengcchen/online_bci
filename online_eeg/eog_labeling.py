@@ -42,10 +42,12 @@ except ImportError:
 class EogOffsetLabelConfig:
     """Settings for deriving label transitions from EOG activity offsets.
 
-    Audio cue onsets are used only as anchors to find the corresponding EOG
-    activity event and preserve the existing cue order. The actual transition
-    sample is the NeuroKit2-derived EOG event offset plus
-    ``label_offset_sec``.
+    By default, ``label_source="audio_anchored"`` uses audio cue onsets only as
+    anchors to find the corresponding EOG activity event and preserve the
+    existing cue order. With ``label_source="eog_events"``, labels are created
+    directly from detected EOG event offsets and audio cues are only saved for
+    plotting. The actual transition sample is the NeuroKit2-derived EOG event
+    offset plus ``label_offset_sec``.
 
     EOG event onset/offset detection is delegated to NeuroKit2:
     ``eog_clean`` -> ``eog_findpeaks`` -> ``eog_features``. NeuroKit2's
@@ -69,6 +71,11 @@ class EogOffsetLabelConfig:
     end_before_next_cue_sec: float = 0.20
     label_offset_sec: float = 0.0
     fallback_to_audio_onset: bool = False
+    label_source: str = "audio_anchored"
+    label_event_start_sec: Optional[float] = None
+    label_event_stop_sec: Optional[float] = None
+    label_event_min_interval_sec: float = 0.0
+    label_event_min_peak_abs_value: Optional[float] = None
 
 
 def eog_activity_score(
@@ -122,6 +129,80 @@ def prepare_eog_detection_signal(
         "detection_signal_mode must be one of 'raw', 'normalized_derivative', "
         f"or 'normalized_derivative_lowpass', got {config.detection_signal_mode!r}."
     )
+
+
+def _fallback_eog_features(cleaned: np.ndarray, peaks: np.ndarray, fs: int) -> pd.DataFrame:
+    """Delineate EOG events when NeuroKit's feature extractor hits a tie edge case."""
+
+    signal = np.asarray(cleaned, dtype=np.float64).reshape(-1)
+    peaks = np.asarray(peaks, dtype=np.int64).reshape(-1)
+    half_window = max(1, int(round(0.5 * int(fs))))
+    leftzeros: List[int] = []
+    rightzeros: List[int] = []
+
+    for peak in peaks:
+        peak = int(np.clip(int(peak), 0, max(0, len(signal) - 1)))
+        start = max(0, peak - half_window)
+        stop = min(len(signal), peak + half_window + 1)
+        epoch = signal[start:stop]
+        indices = np.arange(start, stop, dtype=np.int64)
+        if epoch.size == 0:
+            leftzeros.append(peak)
+            rightzeros.append(peak)
+            continue
+
+        max_value = float(np.nanmax(epoch))
+        max_candidates = indices[np.flatnonzero(epoch == max_value)]
+        max_frame = int(max_candidates[0]) if len(max_candidates) else peak
+        max_pos = int(np.searchsorted(indices, max_frame))
+
+        signs = np.signbit(epoch)
+        crossing_pos = np.flatnonzero(signs[1:] != signs[:-1]) + 1
+        crossings = np.sort(np.append(indices[crossing_pos], max_frame))
+        max_matches = np.flatnonzero(crossings == max_frame)
+        max_crossing_pos = int(max_matches[0]) if len(max_matches) else int(np.searchsorted(crossings, max_frame))
+
+        if max_crossing_pos - 1 >= 0:
+            leftzero = int(crossings[max_crossing_pos - 1])
+        else:
+            before = epoch[: max_pos + 1]
+            before_indices = indices[: max_pos + 1]
+            min_value = float(np.nanmin(before))
+            candidates = before_indices[np.flatnonzero(before == min_value)]
+            leftzero = int(candidates[-1]) if len(candidates) else max(start, peak - 1)
+
+        if max_crossing_pos + 1 < len(crossings):
+            rightzero = int(crossings[max_crossing_pos + 1])
+        else:
+            after = epoch[max_pos:]
+            after_indices = indices[max_pos:]
+            min_value = float(np.nanmin(after))
+            candidates = after_indices[np.flatnonzero(after == min_value)]
+            rightzero = int(candidates[0]) if len(candidates) else min(stop - 1, peak + 1)
+
+        if rightzero <= leftzero:
+            leftzero = max(start, peak - 1)
+            rightzero = min(stop - 1, peak + 1)
+        leftzeros.append(int(leftzero))
+        rightzeros.append(int(rightzero))
+
+    return pd.DataFrame(
+        {
+            "Blink_LeftZeros": np.asarray(leftzeros, dtype=np.int64),
+            "Blink_RightZeros": np.asarray(rightzeros, dtype=np.int64),
+        }
+    )
+
+
+def _safe_neurokit_eog_features(cleaned: np.ndarray, peaks: np.ndarray, fs: int) -> pd.DataFrame:
+    try:
+        import neurokit2 as nk
+
+        return nk.eog_features(cleaned, peaks, sampling_rate=int(fs))
+    except ValueError as exc:
+        if "can only convert an array of size 1 to a Python scalar" not in str(exc):
+            raise
+        return _fallback_eog_features(cleaned, peaks, fs)
 
 
 def _neurokit_eog_events(
@@ -180,7 +261,7 @@ def _neurokit_eog_events(
         if peaks.size == 0:
             continue
 
-        features = nk.eog_features(cleaned, peaks, sampling_rate=int(fs))
+        features = _safe_neurokit_eog_features(cleaned, peaks, fs)
         starts = np.asarray(features.get("Blink_LeftZeros", []), dtype=np.float64).reshape(-1)
         ends = np.asarray(features.get("Blink_RightZeros", []), dtype=np.float64).reshape(-1)
 
@@ -374,6 +455,112 @@ def detect_eog_offsets_after_audio_cues(
     }
 
 
+def detect_eog_label_events(
+    eog_raw: np.ndarray,
+    fs: int,
+    config: EogOffsetLabelConfig,
+) -> Dict[str, Any]:
+    """Find label transitions from EOG event offsets without using audio cues."""
+
+    fs = int(fs)
+    detection_signal = prepare_eog_detection_signal(eog_raw, fs=fs, config=config)
+    events, source_trace = _neurokit_eog_events(detection_signal, fs=fs, config=config)
+
+    n_samples = int(np.asarray(eog_raw).shape[0])
+    label_offset = int(round(float(config.label_offset_sec) * fs))
+    start_sample = (
+        None
+        if config.label_event_start_sec is None
+        else int(round(float(config.label_event_start_sec) * fs))
+    )
+    stop_sample = (
+        None
+        if config.label_event_stop_sec is None
+        else int(round(float(config.label_event_stop_sec) * fs))
+    )
+    min_interval_samples = max(0, int(round(float(config.label_event_min_interval_sec) * fs)))
+    min_peak_abs = config.label_event_min_peak_abs_value
+
+    rows = []
+    event_starts = []
+    event_ends = []
+    label_samples = []
+    peaks = []
+    last_label_sample: Optional[int] = None
+
+    for row in events.sort_values(["end_sample", "start_sample"]).to_dict("records"):
+        start = int(row["start_sample"])
+        end = int(row["end_sample"])
+        label_sample = int(np.clip(end + label_offset, 0, n_samples))
+        peak_abs_value = float(row["peak_abs_value"])
+
+        if start_sample is not None and label_sample < start_sample:
+            continue
+        if stop_sample is not None and label_sample > stop_sample:
+            continue
+        if min_peak_abs is not None and peak_abs_value < float(min_peak_abs):
+            continue
+        if last_label_sample is not None and label_sample - last_label_sample < min_interval_samples:
+            continue
+
+        raw_merged_count = row.get("merged_neurokit_events", 1)
+        merged_neurokit_events = 1 if pd.isna(raw_merged_count) else int(raw_merged_count)
+        peak_sample = int(row["peak_sample"])
+        polarity = int(row["polarity"])
+        peak_value = float(row["peak_value"])
+        detection_source = str(row["detection_source"])
+
+        cue_idx = len(label_samples)
+        event_starts.append(start)
+        event_ends.append(end)
+        label_samples.append(label_sample)
+        peaks.append(peak_abs_value)
+        rows.append(
+            {
+                "cue_index": int(cue_idx),
+                "eog_event_index": int(cue_idx),
+                "audio_onset_sample": np.nan,
+                "audio_onset_time_sec": np.nan,
+                "eog_activity_start_sample": int(start),
+                "eog_activity_start_time_sec": start / float(fs),
+                "eog_activity_end_sample": int(end),
+                "eog_activity_end_time_sec": end / float(fs),
+                "neurokit_peak_sample": int(peak_sample),
+                "neurokit_peak_time_sec": int(peak_sample) / float(fs),
+                "neurokit_peak_value": peak_value,
+                "neurokit_peak_abs_value": peak_abs_value,
+                "neurokit_event_polarity": polarity,
+                "merged_neurokit_events": merged_neurokit_events,
+                "eog_detection_source": detection_source,
+                "eog_detection_signal_mode": str(config.detection_signal_mode),
+                "eog_derivative_lowpass_hz": (
+                    np.nan
+                    if config.derivative_lowpass_hz is None
+                    else float(config.derivative_lowpass_hz)
+                ),
+                "label_transition_sample": int(label_sample),
+                "label_transition_time_sec": label_sample / float(fs),
+                "audio_to_eog_offset_sec": np.nan,
+                "eog_activity_peak_value": peak_abs_value,
+                "used_audio_fallback": False,
+            }
+        )
+        last_label_sample = label_sample
+
+    return {
+        "score": source_trace.astype(np.float64),
+        "threshold": np.nan,
+        "detection_signal": detection_signal.astype(np.float64),
+        "active_segments": events[["start_sample", "end_sample"]].to_numpy(dtype=np.int64),
+        "all_events": events,
+        "event_start_samples": np.asarray(event_starts, dtype=np.int64),
+        "event_end_samples": np.asarray(event_ends, dtype=np.int64),
+        "label_event_samples": np.asarray(label_samples, dtype=np.int64),
+        "peak_values": np.asarray(peaks, dtype=np.float64),
+        "event_table": pd.DataFrame(rows),
+    }
+
+
 def preprocess_recording_with_eog_offset_labels(
     raw_npz: PathLike,
     output_npz: PathLike,
@@ -401,12 +588,33 @@ def preprocess_recording_with_eog_offset_labels(
     eeg = preprocess_eeg_signal(eeg_raw, fs=fs, preprocess_config=preprocess_config)
 
     audio_onset_info = detect_audio_onsets(audio, fs, label_config)
-    eog_info = detect_eog_offsets_after_audio_cues(
-        eog_raw,
-        fs,
-        audio_onset_info["onset_samples"],
-        eog_label_config,
-    )
+    label_source = str(getattr(eog_label_config, "label_source", "audio_anchored")).strip().lower()
+    if label_source in {"eog", "eog_events", "eog_only"}:
+        eog_info = detect_eog_label_events(
+            eog_raw,
+            fs,
+            eog_label_config,
+        )
+        label_convention = (
+            "sample_labels indexes class_names; transitions occur at detected EOG activity ends; "
+            "audio_cue_onset_samples are visual references only"
+        )
+    elif label_source in {"audio_anchored", "audio_anchored_eog_offset"}:
+        eog_info = detect_eog_offsets_after_audio_cues(
+            eog_raw,
+            fs,
+            audio_onset_info["onset_samples"],
+            eog_label_config,
+        )
+        label_convention = (
+            "sample_labels indexes class_names; transitions occur at EOG activity end after each audio cue; "
+            "cue_onset_samples stores those EOG-derived transition samples"
+        )
+    else:
+        raise ValueError(
+            "EogOffsetLabelConfig.label_source must be 'audio_anchored' or 'eog_events', "
+            f"got {eog_label_config.label_source!r}."
+        )
     eog_derivative = normalized_signal_derivative(eog_raw)
     eog_onset_info = {
         "onset_samples": eog_info["label_event_samples"],
@@ -491,16 +699,14 @@ def preprocess_recording_with_eog_offset_labels(
         label_config_json=np.array(json.dumps(_json_safe(asdict(label_config)))),
         eog_labeling_config_json=np.array(json.dumps(_json_safe(asdict(eog_label_config)))),
         cue_table_csv=np.array(str(cue_csv)),
-        label_convention=np.array(
-            "sample_labels indexes class_names; transitions occur at EOG activity end after each audio cue; "
-            "cue_onset_samples stores those EOG-derived transition samples"
-        ),
+        label_convention=np.array(label_convention),
     )
     return output_npz, cue_table
 
 
 __all__ = [
     "EogOffsetLabelConfig",
+    "detect_eog_label_events",
     "detect_eog_offsets_after_audio_cues",
     "eog_activity_score",
     "prepare_eog_detection_signal",

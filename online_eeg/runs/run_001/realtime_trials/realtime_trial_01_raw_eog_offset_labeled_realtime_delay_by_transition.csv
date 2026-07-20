@@ -1,0 +1,6 @@
+true_transition_sample,true_transition_time_sec,from_label,to_label,transition_type,first_correct_prediction_time_sec,delay_to_first_correct_prediction_sec,predicted_transition_time_sec,delay_to_predicted_transition_sec,matched_first_correct_prediction,matched_predicted_transition
+1703,8.515,0,1,0->1,8.78,0.2649999999999988,8.78,0.2649999999999988,True,True
+2105,10.525,1,0,1->0,,,,,False,False
+3083,15.415,0,1,0->1,15.42,0.005000000000000782,,,True,False
+3788,18.94,1,0,1->0,18.94,0.0,19.48,0.5399999999999991,True,True
+4559,22.795,0,1,0->1,22.8,0.004999999999999005,23.24,0.44499999999999673,True,True

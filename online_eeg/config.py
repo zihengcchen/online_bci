@@ -48,6 +48,7 @@ class AudioLabelConfig:
     onset_threshold: Optional[float] = None
     onset_threshold_mad_multiplier: float = 8.0
     onset_min_interval_sec: float = 0.50
+    onset_min_active_duration_sec: float = 0.0
     onset_peak_window_sec: float = 0.20
 
 @dataclass

@@ -64,6 +64,7 @@ def estimate_transition_delay(
     prediction_df: pd.DataFrame,
     sample_labels: np.ndarray,
     fs: int,
+    class_names: Sequence[str] = (),
     max_delay_sec: Optional[float] = 5.0,
 ) -> pd.DataFrame:
     labels = np.asarray(sample_labels, dtype=np.int64).reshape(-1)
@@ -119,7 +120,9 @@ def estimate_transition_delay(
                 "true_transition_sample": int(sample_idx),
                 "true_transition_time_sec": true_t,
                 "from_label": from_label,
+                "from_label_name": _label_name(from_label, class_names),
                 "to_label": to_label,
+                "to_label_name": _label_name(to_label, class_names),
                 "transition_type": f"{from_label}->{to_label}",
                 "first_correct_prediction_time_sec": first_correct_time,
                 "delay_to_first_correct_prediction_sec": delay_first_correct,

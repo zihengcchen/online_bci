@@ -59,7 +59,12 @@ def _prediction_analysis_tables(
 ) -> Dict[str, pd.DataFrame]:
     fs = int(rec["samplerate"])
     sample_labels = rec["sample_labels"]
-    delay = estimate_transition_delay(prediction_df, sample_labels=sample_labels, fs=fs)
+    delay = estimate_transition_delay(
+        prediction_df,
+        sample_labels=sample_labels,
+        fs=fs,
+        class_names=class_names,
+    )
     cue_delay = estimate_cue_prediction_delay(
         prediction_df,
         sample_labels=sample_labels,
@@ -300,12 +305,12 @@ def evaluate_prediction_log_against_labeled_recording(
             y_true = valid["true_label"].astype(int).to_numpy()
             y_pred = valid["pred_label"].astype(int).to_numpy()
             summary, per_class = classification_summary(y_true, y_pred, class_names)
-            pred_df["correct"] = np.nan
+            pred_df["correct"] = pd.Series(pd.NA, index=pred_df.index, dtype="boolean")
             pred_df.loc[valid.index, "correct"] = y_true == y_pred
         else:
             summary = pd.DataFrame([{"n_windows": int(len(pred_df)), "accuracy": np.nan, "balanced_accuracy": np.nan}])
             per_class = pd.DataFrame()
-            pred_df["correct"] = np.nan
+            pred_df["correct"] = pd.Series(pd.NA, index=pred_df.index, dtype="boolean")
 
     valid_pred_df = pred_df[pred_df["valid_true_label"].astype(bool)] if "valid_true_label" in pred_df else pred_df
     tables = {

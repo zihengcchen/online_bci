@@ -1,0 +1,8 @@
+cue_index,cue_onset_sample,cue_onset_time_sec,label_transition_sample,label_transition_time_sec,from_label,from_label_name,target_label,target_label_name,transition_type,first_correct_prediction_time_sec,cue_to_first_correct_prediction_sec,predicted_transition_time_sec,cue_to_predicted_transition_sec,sustained_prediction_time_sec,sustained_prediction_confirm_time_sec,cue_to_sustained_prediction_sec,sustained_windows,matched_first_correct_prediction,matched_predicted_transition,matched_sustained_prediction
+0,1449,7.245,1449,7.245,0,Eyes Open,1,Eyes Closed,0->1,8.28,1.0349999999999993,8.28,1.0349999999999993,8.34,8.38,1.0949999999999998,3,True,True,True
+1,2660,13.3,2660,13.3,1,Eyes Closed,0,Eyes Open,1->0,,,,,,,,3,False,False,False
+2,2886,14.43,2886,14.43,0,Eyes Open,1,Eyes Closed,0->1,14.44,0.009999999999999787,,,14.44,14.48,0.009999999999999787,3,True,False,True
+3,3491,17.455,3491,17.455,1,Eyes Closed,0,Eyes Open,1->0,17.46,0.005000000000002558,18.48,1.0250000000000021,17.46,17.5,0.005000000000002558,3,True,True,True
+4,4218,21.09,4218,21.09,0,Eyes Open,1,Eyes Closed,0->1,21.1,0.010000000000001563,,,21.1,21.14,0.010000000000001563,3,True,False,True
+5,4981,24.905,4981,24.905,1,Eyes Closed,0,Eyes Open,1->0,24.92,0.015000000000000568,25.58,0.6749999999999972,24.92,24.96,0.015000000000000568,3,True,True,True
+6,5695,28.475,5695,28.475,0,Eyes Open,1,Eyes Closed,0->1,28.48,0.004999999999999005,,,28.48,28.52,0.004999999999999005,3,True,False,True

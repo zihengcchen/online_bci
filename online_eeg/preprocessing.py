@@ -78,6 +78,16 @@ def detect_audio_onsets(
 
     active = envelope >= threshold
     rising = np.flatnonzero(active & np.r_[True, ~active[:-1]])
+    falling = np.flatnonzero(active & np.r_[~active[1:], True])
+    min_active_samples = max(1, int(round(float(config.onset_min_active_duration_sec) * fs)))
+    if min_active_samples > 1 and len(rising):
+        sustained = []
+        for idx in rising:
+            stop_candidates = falling[falling >= idx]
+            stop = int(stop_candidates[0]) if len(stop_candidates) else int(idx)
+            if stop - int(idx) + 1 >= min_active_samples:
+                sustained.append(int(idx))
+        rising = np.asarray(sustained, dtype=np.int64)
 
     min_interval_samples = max(1, int(round(float(config.onset_min_interval_sec) * fs)))
     kept: List[int] = []
@@ -85,11 +95,6 @@ def detect_audio_onsets(
         idx = int(idx)
         if not kept or idx - kept[-1] >= min_interval_samples:
             kept.append(idx)
-        else:
-            # Keep the earlier onset but update it if the later edge has a stronger envelope.
-            prev = kept[-1]
-            if envelope[idx] > envelope[prev]:
-                kept[-1] = idx
 
     peak_window = max(1, int(round(float(config.onset_peak_window_sec) * fs)))
     peaks = []
