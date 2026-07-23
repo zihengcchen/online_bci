@@ -2,8 +2,8 @@
 
 conda config --set solver libmamba
 
-conda create -n super python=3.12
-conda activate super
+conda create -n cuda13 python=3.12
+conda activate cuda13
 
 python -m pip install --upgrade pip setuptools wheel
 
