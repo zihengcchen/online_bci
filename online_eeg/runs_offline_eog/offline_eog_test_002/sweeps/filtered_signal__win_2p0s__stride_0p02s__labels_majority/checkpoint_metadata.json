@@ -1,0 +1,320 @@
+{
+  "model_config": {
+    "input_size": 4,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "num_classes": 2,
+    "dropout": 0.0
+  },
+  "window_config": {
+    "feature_mode": "filtered_signal",
+    "window_sec": 2.0,
+    "stride_sec": 0.02,
+    "label_mode": "majority"
+  },
+  "training_config": {
+    "train_fraction": 1.0,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "dropout": 0,
+    "batch_size": 64,
+    "epochs": 20,
+    "lr": 0.001,
+    "seed": 888,
+    "normalization": "train_zscore",
+    "deterministic": true,
+    "device": null
+  },
+  "normalizer_mean": [
+    [
+      [
+        8.662994765984422e-09,
+        8.385765859486582e-09,
+        7.911402200022621e-09,
+        5.260158086883848e-09
+      ]
+    ]
+  ],
+  "normalizer_std": [
+    [
+      [
+        0.1100928857922554,
+        0.10685884207487106,
+        0.1037069708108902,
+        0.1097959503531456
+      ]
+    ]
+  ],
+  "normalizer_mode": "train_zscore",
+  "fs": 200,
+  "class_names": [
+    "Eyes Open",
+    "Eyes Closed"
+  ],
+  "source_files": [
+    "d:\\BME\\bci\\online_bci\\online_eeg\\runs_offline_eog\\offline_eog_test_002\\labeled\\run_002__run_002_train_eog_offset_labeled.npz",
+    "d:\\BME\\bci\\online_bci\\online_eeg\\runs_offline_eog\\offline_eog_test_002\\labeled\\run_003__run_003_train_eog_offset_labeled.npz",
+    "d:\\BME\\bci\\online_bci\\online_eeg\\runs_offline_eog\\offline_eog_test_002\\labeled\\run_004__run_004_train_eog_offset_labeled.npz",
+    "d:\\BME\\bci\\online_bci\\online_eeg\\runs_offline_eog\\offline_eog_test_002\\labeled\\run_005__run_005_train_eog_offset_labeled.npz"
+  ],
+  "final_val_summary": [
+    {
+      "n_windows": 1,
+      "accuracy": 1.0,
+      "balanced_accuracy": 1.0
+    }
+  ],
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.26910536705749083,
+      "train_acc": 0.8952066171165881,
+      "val_loss": 0.02732127159833908,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.14676212781076994,
+      "train_acc": 0.9478381960639565,
+      "val_loss": 0.028371531516313553,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.13104247213139494,
+      "train_acc": 0.9516299515125077,
+      "val_loss": 0.026373133063316345,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.13348444956190653,
+      "train_acc": 0.9511098434642552,
+      "val_loss": 0.03735698387026787,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.12480001180987549,
+      "train_acc": 0.9548680435548547,
+      "val_loss": 0.03763554245233536,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.11744226080981136,
+      "train_acc": 0.9564787007365401,
+      "val_loss": 0.022114580497145653,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.11420780457249677,
+      "train_acc": 0.958324245423888,
+      "val_loss": 0.024992601945996284,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.11031418362978934,
+      "train_acc": 0.9599516802845495,
+      "val_loss": 0.028595956042408943,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.10510628236079539,
+      "train_acc": 0.9621160008724393,
+      "val_loss": 0.023632168769836426,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.10593483204491844,
+      "train_acc": 0.9611428954918376,
+      "val_loss": 0.02820361591875553,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 11,
+      "train_loss": 0.1024127652136077,
+      "train_acc": 0.9619817794406322,
+      "val_loss": 0.03439263999462128,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 12,
+      "train_loss": 0.09910059743503427,
+      "train_acc": 0.9641461000285221,
+      "val_loss": 0.01634037122130394,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 13,
+      "train_loss": 0.09274382187213909,
+      "train_acc": 0.9673338590339412,
+      "val_loss": 0.018374115228652954,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 14,
+      "train_loss": 0.09105333353765775,
+      "train_acc": 0.9671828599231582,
+      "val_loss": 0.01918182708323002,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 15,
+      "train_loss": 0.08935917354898301,
+      "train_acc": 0.9683740751304465,
+      "val_loss": 0.01690724492073059,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 16,
+      "train_loss": 0.0863686394389359,
+      "train_acc": 0.9697330671274936,
+      "val_loss": 0.007464257534593344,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 17,
+      "train_loss": 0.07873968802766368,
+      "train_acc": 0.9721993859369494,
+      "val_loss": 0.029917610809206963,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 18,
+      "train_loss": 0.07638768784373941,
+      "train_acc": 0.9737597100817073,
+      "val_loss": 0.013053911738097668,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 19,
+      "train_loss": 0.07202335796476375,
+      "train_acc": 0.9745147056356224,
+      "val_loss": 0.025582483038306236,
+      "val_acc": 1.0
+    },
+    {
+      "epoch": 20,
+      "train_loss": 0.06929045284886233,
+      "train_acc": 0.9757562538798382,
+      "val_loss": 0.0053132036700844765,
+      "val_acc": 1.0
+    }
+  ],
+  "artifact_checkpoint_path": "d:\\BME\\bci\\online_bci\\online_eeg\\runs_offline_eog\\offline_eog_test_002\\sweeps\\filtered_signal__win_2p0s__stride_0p02s__labels_majority\\lstm_checkpoint.pt",
+  "model_catalog_name": "runs_run_002--run_003--run_004--run_005__files_4__src_755f7d56e8__filtered_signal__win_2p0s__stride_0p02s__labels_majority__norm_train_zscore__h128__layers_2__drop_0__e__39857cf1ae.pt",
+  "model_catalog_path": "D:\\BME\\bci\\online_bci\\online_eeg\\models\\runs_run_002--run_003--run_004--run_005__files_4__src_755f7d56e8__filtered_signal__win_2p0s__stride_0p02s__labels_majority__norm_train_zscore__h128__layers_2__drop_0__e__39857cf1ae.pt",
+  "models_dir": "D:\\BME\\bci\\online_bci\\online_eeg\\models",
+  "source_preprocess_configs": [
+    {
+      "eeg_channels": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "eog_channels": [
+        5
+      ],
+      "audio_channel": 16,
+      "apply_software_filters": true,
+      "bandpass_low_hz": 8.0,
+      "bandpass_high_hz": 35.0,
+      "notch_hz": [
+        60.0
+      ],
+      "notch_quality_factor": 30.0,
+      "filter_order": 4,
+      "demean_channels": true
+    },
+    {
+      "eeg_channels": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "eog_channels": [
+        5
+      ],
+      "audio_channel": 16,
+      "apply_software_filters": true,
+      "bandpass_low_hz": 8.0,
+      "bandpass_high_hz": 35.0,
+      "notch_hz": [
+        60.0
+      ],
+      "notch_quality_factor": 30.0,
+      "filter_order": 4,
+      "demean_channels": true
+    },
+    {
+      "eeg_channels": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "eog_channels": [
+        5
+      ],
+      "audio_channel": 16,
+      "apply_software_filters": true,
+      "bandpass_low_hz": 8.0,
+      "bandpass_high_hz": 35.0,
+      "notch_hz": [
+        60.0
+      ],
+      "notch_quality_factor": 30.0,
+      "filter_order": 4,
+      "demean_channels": true
+    },
+    {
+      "eeg_channels": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "eog_channels": [
+        5
+      ],
+      "audio_channel": 16,
+      "apply_software_filters": true,
+      "bandpass_low_hz": 8.0,
+      "bandpass_high_hz": 35.0,
+      "notch_hz": [
+        60.0
+      ],
+      "notch_quality_factor": 30.0,
+      "filter_order": 4,
+      "demean_channels": true
+    }
+  ],
+  "preprocess_config": {
+    "eeg_channels": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "eog_channels": [
+      5
+    ],
+    "audio_channel": 16,
+    "apply_software_filters": true,
+    "bandpass_low_hz": 8.0,
+    "bandpass_high_hz": 35.0,
+    "notch_hz": [
+      60.0
+    ],
+    "notch_quality_factor": 30.0,
+    "filter_order": 4,
+    "demean_channels": true
+  }
+}
